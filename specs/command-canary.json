@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "name": "command-verifier-canary",
+  "prompt": "범용 ChatGPT 검증 루프 작업이다.\n\noperation_id: {operation_id}\n\n첨부한 context.zip을 읽고 다운로드 가능한 result.zip을 만들어라. result.zip에는 solution/input.txt만 넣고 내용은 정확히 PASS: browser loop verified 한 줄과 마지막 개행이어야 한다.",
+  "context_files": [
+    {
+      "source": "../fixtures/broken.txt",
+      "member": "workspace/input.txt"
+    }
+  ],
+  "result": {
+    "filename": "result.zip",
+    "required_members": [
+      "solution/input.txt"
+    ],
+    "allowed_members": [
+      "solution/input.txt"
+    ]
+  },
+  "verifier": {
+    "kind": "command",
+    "argv": [
+      "python",
+      "verifiers/text_canary.py",
+      "{extracted_dir}"
+    ],
+    "cwd": "..",
+    "timeout_seconds": 30
+  },
+  "max_attempts": 3
+}

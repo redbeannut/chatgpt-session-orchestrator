@@ -85,6 +85,77 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(harness.ContractError):
             harness.record_session(self.run_dir, "https://chatgpt.com/c/other")
 
+    def test_next_action_and_submission_keys_are_idempotent(self) -> None:
+        fresh_run = self.root / "fresh-run"
+        harness.prepare(fresh_run, PROJECT_ROOT / "fixtures" / "broken.txt")
+        initial = harness.next_action(fresh_run)
+        self.assertEqual(initial["action"], "submit_initial")
+        self.assertEqual(initial["submission_key"].split(":")[-2:], ["initial", "0"])
+        harness.record_session(fresh_run, "https://chatgpt.com/c/idempotent")
+        harness.record_session(fresh_run, "https://chatgpt.com/c/idempotent")
+        state = json.loads((fresh_run / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(state["submissions"]), 1)
+        self.assertEqual(harness.next_action(fresh_run)["action"], "await_download")
+
+    def test_feedback_action_stays_in_same_conversation(self) -> None:
+        harness.verify(self.run_dir, self.write_result("wrong\n"))
+        action = harness.next_action(self.run_dir)
+        self.assertEqual(action["action"], "submit_feedback")
+        self.assertEqual(action["conversation_url"], "https://chatgpt.com/c/test-conversation")
+        harness.record_submission(self.run_dir, action["conversation_url"], "feedback")
+        self.assertEqual(harness.next_action(self.run_dir)["action"], "await_download")
+
+    def test_command_verifier_uses_local_configured_command(self) -> None:
+        spec_path = self.root / "command-spec.json"
+        spec = {
+            "schema_version": 1,
+            "name": "command-test",
+            "prompt": "operation_id: {operation_id}",
+            "context_files": [],
+            "result": {
+                "filename": "result.zip",
+                "required_members": [harness.EXPECTED_MEMBER],
+                "allowed_members": [harness.EXPECTED_MEMBER],
+            },
+            "verifier": {
+                "kind": "command",
+                "argv": [sys.executable, str(PROJECT_ROOT / "verifiers" / "text_canary.py"), "{extracted_dir}"],
+                "cwd": str(PROJECT_ROOT),
+                "timeout_seconds": 30,
+            },
+            "max_attempts": 2,
+        }
+        spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        command_run = self.root / "command-run"
+        harness.prepare(command_run, PROJECT_ROOT / "fixtures" / "broken.txt", spec_path)
+        harness.record_session(command_run, "https://chatgpt.com/c/command-test")
+        report, exit_code = harness.verify(command_run, self.write_result(harness.EXPECTED_TEXT))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["verifier"]["exit_code"], 0)
+        self.assertEqual(report["verifier"]["stdout"], "verified\n")
+
+    def test_different_command_failures_do_not_trigger_repeated_stop(self) -> None:
+        command_run = self.root / "different-failures"
+        harness.prepare(
+            command_run,
+            PROJECT_ROOT / "fixtures" / "broken.txt",
+            PROJECT_ROOT / "specs" / "command-canary.json",
+        )
+        harness.record_session(command_run, "https://chatgpt.com/c/different-failures")
+        first, _ = harness.verify(command_run, self.write_result("first\n"))
+        second, _ = harness.verify(command_run, self.write_result("second\n"))
+        self.assertNotEqual(first["failure_fingerprint"], second["failure_fingerprint"])
+        state = json.loads((command_run / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "feedback_ready")
+
+    def test_invalid_spec_does_not_leave_run_directory(self) -> None:
+        invalid_spec = self.root / "invalid-spec.json"
+        invalid_spec.write_text('{"schema_version": 1}', encoding="utf-8")
+        invalid_run = self.root / "invalid-run"
+        with self.assertRaises(harness.ContractError):
+            harness.prepare(invalid_run, PROJECT_ROOT / "fixtures" / "broken.txt", invalid_spec)
+        self.assertFalse(invalid_run.exists())
+
 
 def uuid_suffix(value: str) -> str:
     return str(abs(hash(value)))
@@ -92,4 +163,3 @@ def uuid_suffix(value: str) -> str:
 
 if __name__ == "__main__":
     unittest.main()
-

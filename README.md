@@ -1,9 +1,10 @@
 # ChatGPT Browser Loop PoC
 
 Codex가 로그인된 Chrome의 ChatGPT 대화를 조작하고, 생성된 ZIP을 로컬에서
-검증한 뒤 실패 결과를 같은 대화로 돌려보내는 최소 수직 슬라이스다.
+검증한 뒤 실패 결과를 같은 대화로 돌려보내는 범용 실행 하네스다.
 
 관련 노트는 [[../0. 하네스 엔지니어링 백과사전]]이다.
+구조와 확장 지점은 [[ARCHITECTURE]]에 정리했다.
 
 ## 범위
 
@@ -35,18 +36,57 @@ Codex가 로그인된 Chrome의 ChatGPT 대화를 조작하고, 생성된 ZIP을
 인라인으로 전달했다. 상태 머신·안전한 ZIP 검증·실패 후 재시도는 실증됐지만,
 무인 파일 업로드는 아직 통과하지 않았다.
 
-다음 단계는 현재 상태 머신을 유지한 채 `browser-bridge` 또는
-`codex-chatgpt-control` 방식의 파일 전송 어댑터를 연결하고, 같은 계약으로
-업로드까지 다시 검증하는 것이다. 그 뒤 HWPX 구조·렌더링 검증기를 추가한다.
+다음 단계는 현재 상태 머신을 유지한 채 `browser-bridge`와
+`codex-chatgpt-control`을 전송 계층으로 연결하고, 같은 계약으로 업로드까지
+다시 검증하는 것이다. 특정 문서 형식은 이후 작업별 검증기 중 하나일 뿐이다.
+
+## 범용 작업 계약
+
+`specs/command-canary.json`처럼 작업마다 다음 항목을 선언한다.
+
+- ChatGPT에 보낼 프롬프트와 컨텍스트 파일 목록.
+- 기대하는 결과 ZIP 이름과 필수·허용 파일 집합.
+- `exact_text` 또는 로컬 `command` 검증기.
+- 최대 반복 횟수.
+
+명령형 검증기는 로컬 명세에 지정된 argv만 `shell=False`로 실행한다. 다운로드한
+결과물에 포함된 스크립트는 자동 실행하지 않는다.
 
 ## 실행
 
 ```powershell
 python src/harness.py prepare --run-dir runs/poc-001
+python src/harness.py next-action --run-dir runs/poc-001
 python src/harness.py record-session --run-dir runs/poc-001 --url "https://chatgpt.com/c/..."
 python src/harness.py verify --run-dir runs/poc-001 --result-zip runs/poc-001/downloads/result.zip
 python src/harness.py status --run-dir runs/poc-001
 ```
+
+작업별 로컬 검증 명령을 쓰는 범용 실행은 다음과 같다.
+
+```powershell
+python src/harness.py prepare --run-dir runs/task-001 --spec specs/command-canary.json
+python src/harness.py next-action --run-dir runs/task-001
+python src/harness.py record-submission --run-dir runs/task-001 --kind initial --url "https://chatgpt.com/c/..."
+python src/harness.py verify --run-dir runs/task-001 --result-zip runs/task-001/downloads/result.zip
+```
+
+실패 뒤 `next-action`은 `submit_feedback`과 고유 제출 키를 반환한다. 실제 제출 뒤
+`record-submission --kind feedback`을 기록하면 다시 `await_download` 상태가 된다.
+
+## Browser Bridge 준비 상태
+
+- 소스와 빌드는 `C:\Users\admin\tools\browser-bridge`에 설치했다.
+- 로컬 서버는 `127.0.0.1:8765`에서 동작한다.
+- 토큰은 저장소 밖 `C:\Users\admin\.browser-bridge\token`에 있다.
+- Codex MCP `browser-bridge`와 ChatGPT Surface Control 플러그인을 등록했다.
+- 재기동은 `powershell -File scripts/start_browser_bridge.ps1`로 수행한다.
+
+Chrome 보안 정책 때문에 `chrome://extensions`의 압축 해제 확장 등록은 사용자가
+한 번 직접 해야 한다. 등록할 폴더는
+`C:\Users\admin\tools\browser-bridge\extension`이며, 옵션 화면에는 위 토큰 파일의
+내용을 붙여넣고 **Save & connect**를 누른다. 연결 후 health의
+`extensionConnected`가 `true`여야 실제 파일 업로드 재검증을 시작한다.
 
 첫 검증 실패의 종료 코드는 `2`다. 인프라 또는 계약 오류는 `1`, 통과는 `0`이다.
 
