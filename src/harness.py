@@ -367,7 +367,13 @@ def record_submission(run_dir: Path, url: str, kind: str) -> dict:
     if project_url:
         project_parts = urlsplit(project_url).path.strip("/").split("/")
         conversation_parts = urlsplit(normalized).path.strip("/").split("/")
-        if len(conversation_parts) != 4 or conversation_parts[:2] != project_parts[:2]:
+        project_id = project_parts[1]
+        conversation_project = conversation_parts[1] if len(conversation_parts) == 4 else ""
+        same_project = conversation_project == project_id or (
+            re.fullmatch(r"g-p-[0-9a-fA-F]{32}", project_id)
+            and conversation_project.startswith(f"{project_id}-")
+        )
+        if len(conversation_parts) != 4 or conversation_parts[0] != "g" or not same_project:
             raise ContractError("지정한 ChatGPT 프로젝트에 속한 대화가 아닙니다.")
     if kind not in {"initial", "feedback"}:
         raise ContractError("제출 종류는 initial 또는 feedback이어야 합니다.")

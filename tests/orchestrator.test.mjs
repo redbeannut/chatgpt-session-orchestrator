@@ -280,6 +280,7 @@ test("세 작업을 서로 다른 작업자에서 동시에 실행하고 모두 
       stateDir,
       jobs: runs.map(({ runDir }) => ({ runDir, requiredCapabilities: ["research"] })),
       adapter,
+      dispatchIntervalMs: 0,
     });
     assert.equal(maxActive, 3);
     assert.deepEqual(results.map((item) => item.state), ["COMPLETED", "COMPLETED", "COMPLETED"]);
@@ -289,6 +290,92 @@ test("세 작업을 서로 다른 작업자에서 동시에 실행하고 모두 
       ["available", "available", "available"],
     );
     assert.equal(new Set(Object.values(status.operations).map((item) => item.worker_id)).size, 3);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("병렬 작업 하나가 실패해도 나머지를 끝까지 기다리고 모든 작업자를 해제한다", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "orchestrator-batch-failure-"));
+  try {
+    const stateDir = path.join(root, "state");
+    for (const workerId of ["worker-a", "worker-b", "worker-c"]) {
+      registerWorker(stateDir, { workerId, capabilities: ["research"] });
+    }
+    const runs = ["job-a", "job-b", "job-c"].map((name) => createRun(root, name));
+    const finished = [];
+    await assert.rejects(
+      runOperations({
+        stateDir,
+        jobs: runs.map(({ runDir }) => ({ runDir, requiredCapabilities: ["research"] })),
+        dispatchIntervalMs: 0,
+        adapter: {
+          async execute(worker, options) {
+            if (worker.worker_id === "worker-b") throw new Error("worker failed");
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            finished.push(worker.worker_id);
+            return updateRun(options.runDir, worker);
+          },
+        },
+      }),
+      /1개 작업이 실패했습니다/,
+    );
+    assert.deepEqual(finished.sort(), ["worker-a", "worker-c"]);
+    const status = orchestratorStatus(stateDir);
+    assert.deepEqual(
+      Object.values(status.workers).map((worker) => worker.state),
+      ["available", "available", "available"],
+    );
+    assert.deepEqual(
+      Object.values(status.operations).map((operation) => operation.state).sort(),
+      ["COMPLETED", "COMPLETED", "FAILED"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("요청 제한이 감지되면 아직 시작하지 않은 병렬 작업을 차단한다", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "orchestrator-rate-limit-"));
+  try {
+    const stateDir = path.join(root, "state");
+    for (const workerId of ["worker-a", "worker-b", "worker-c"]) {
+      registerWorker(stateDir, { workerId, capabilities: ["research"] });
+    }
+    const runs = ["job-a", "job-b", "job-c"].map((name) => createRun(root, name));
+    let calls = 0;
+    await assert.rejects(
+      runOperations({
+        stateDir,
+        jobs: runs.map(({ runDir }) => ({ runDir, requiredCapabilities: ["research"] })),
+        dispatchIntervalMs: 5,
+        adapter: {
+          async execute() {
+            calls += 1;
+            const error = new Error("rate limited");
+            error.code = "rate_limit";
+            throw error;
+          },
+        },
+      }),
+      (error) => error.code === "rate_limit" && /3개 작업이 실패/.test(error.message),
+    );
+    assert.equal(calls, 1);
+    const status = orchestratorStatus(stateDir);
+    assert.equal(Object.keys(status.operations).length, 1);
+    assert.equal(status.workers["worker-a"].state, "available");
+    assert.equal(Date.parse(status.account.blocked_until) > Date.now(), true);
+
+    const blockedRun = createRun(root, "job-after-rate-limit");
+    await assert.rejects(
+      runOperation({
+        stateDir,
+        job: { runDir: blockedRun.runDir, requiredCapabilities: ["research"] },
+        adapter: { async execute() { calls += 1; } },
+      }),
+      (error) => error.code === "rate_limit" && /냉각 중/.test(error.message),
+    );
+    assert.equal(calls, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

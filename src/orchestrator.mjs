@@ -14,6 +14,7 @@ import {
 
 const EVENT_LOG = "orchestrator-events.jsonl";
 const MAX_WORKERS = 3;
+const RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1000;
 const TERMINAL_STATES = new Set(["COMPLETED", "FAILED"]);
 const ACTIVE_OPERATIONS = new Set();
 
@@ -49,7 +50,9 @@ export function readOrchestratorEvents(stateDir) {
 function applyEvent(state, event) {
   const worker = event.worker_id ? state.workers[event.worker_id] : null;
   const operation = event.operation_id ? state.operations[event.operation_id] : null;
-  if (event.type === "WORKER_REGISTERED") {
+  if (event.type === "ACCOUNT_BLOCKED") {
+    state.account.blocked_until = event.blocked_until;
+  } else if (event.type === "WORKER_REGISTERED") {
     if (worker) throw new Error(`작업자가 이미 등록돼 있습니다: ${event.worker_id}`);
     if (Object.keys(state.workers).length >= MAX_WORKERS) {
       throw new Error(`작업자는 최대 ${MAX_WORKERS}개까지 등록할 수 있습니다.`);
@@ -126,7 +129,20 @@ function applyEvent(state, event) {
 }
 
 export function replayOrchestrator(events) {
-  return events.reduce(applyEvent, { schema_version: 1, workers: {}, operations: {} });
+  return events.reduce(applyEvent, {
+    schema_version: 1,
+    account: { blocked_until: null },
+    workers: {},
+    operations: {},
+  });
+}
+
+function assertAccountAvailable(state) {
+  if (state.account.blocked_until && Date.parse(state.account.blocked_until) > Date.now()) {
+    const error = new Error(`ChatGPT 계정 요청 제한 냉각 중입니다: ${state.account.blocked_until}`);
+    error.code = "rate_limit";
+    throw error;
+  }
 }
 
 function appendEvent(stateDir, type, data) {
@@ -308,6 +324,7 @@ export async function runOperation({ stateDir, job, adapter = new BrowserSession
       }
       return state.operations[operationId];
     }
+    assertAccountAvailable(state);
     state = leaseWorker(stateDir, operationId, job.workerId || null);
     operation = state.operations[operationId];
     const worker = state.workers[operation.worker_id];
@@ -354,6 +371,11 @@ export async function runOperation({ stateDir, job, adapter = new BrowserSession
       } catch (bindingError) {
         errorMessage += `; 대화 URL 기록 실패: ${bindingError.message}`;
       }
+      if (error.code === "rate_limit") {
+        state = appendEvent(stateDir, "ACCOUNT_BLOCKED", {
+          blocked_until: new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS).toISOString(),
+        });
+      }
       state = changeOperationState(stateDir, operationId, "FAILED", { error: errorMessage });
       releaseWorker(stateDir, operationId, state.operations[operationId].worker_id);
       throw error;
@@ -363,11 +385,49 @@ export async function runOperation({ stateDir, job, adapter = new BrowserSession
   }
 }
 
-export async function runOperations({ stateDir, jobs, adapter = new BrowserSessionAdapter() }) {
+export async function runOperations({
+  stateDir,
+  jobs,
+  adapter = new BrowserSessionAdapter(),
+  dispatchIntervalMs = 60_000,
+}) {
   if (!Array.isArray(jobs) || jobs.length === 0 || jobs.length > MAX_WORKERS) {
     throw new Error(`jobs는 1~${MAX_WORKERS}개여야 합니다.`);
   }
-  return Promise.all(jobs.map((job) => runOperation({ stateDir, job, adapter })));
+  if (!Number.isInteger(dispatchIntervalMs) || dispatchIntervalMs < 0) {
+    throw new Error("dispatchIntervalMs는 0 이상의 정수여야 합니다.");
+  }
+  let accountBlocked = false;
+  const outcomes = await Promise.allSettled(
+    jobs.map(async (job, index) => {
+      if (index && dispatchIntervalMs) {
+        await new Promise((resolve) => setTimeout(resolve, index * dispatchIntervalMs));
+      }
+      if (accountBlocked) {
+        const error = new Error("앞선 작업에서 ChatGPT 요청 제한이 감지되어 제출을 차단했습니다.");
+        error.code = "rate_limit";
+        throw error;
+      }
+      try {
+        return await runOperation({ stateDir, job, adapter });
+      } catch (error) {
+        if (error.code === "rate_limit") accountBlocked = true;
+        throw error;
+      }
+    }),
+  );
+  const failures = outcomes.filter((outcome) => outcome.status === "rejected");
+  if (failures.length) {
+    const error = new AggregateError(
+      failures.map((outcome) => outcome.reason),
+      `${failures.length}개 작업이 실패했습니다.`,
+    );
+    if (failures.some((outcome) => outcome.reason?.code === "rate_limit")) {
+      error.code = "rate_limit";
+    }
+    throw error;
+  }
+  return outcomes.map((outcome) => outcome.value);
 }
 
 export function orchestratorStatus(stateDir) {

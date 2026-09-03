@@ -126,6 +126,25 @@ class HarnessTests(unittest.TestCase):
         recorded = harness.record_session(project_run, PROJECT_CHAT_URL)
         self.assertEqual(recorded["conversation_url"], PROJECT_CHAT_URL)
 
+        live_project = "https://chatgpt.com/g/g-p-6a991e8091dc819195e06f600822bd05/project"
+        spec["project_url"] = live_project
+        spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        slugged_run = self.root / "slugged-project-run"
+        harness.prepare(slugged_run, PROJECT_ROOT / "fixtures" / "broken.txt", spec_path)
+        slugged_chat = (
+            "https://chatgpt.com/g/g-p-6a991e8091dc819195e06f600822bd05-codex-browser-canary"
+            "/c/6a98d663-fa60-83e8-9470-dd4056981f39"
+        )
+        self.assertEqual(harness.record_session(slugged_run, slugged_chat)["conversation_url"], slugged_chat)
+        lookalike_run = self.root / "lookalike-project-run"
+        harness.prepare(lookalike_run, PROJECT_ROOT / "fixtures" / "broken.txt", spec_path)
+        with self.assertRaises(harness.ContractError):
+            harness.record_session(
+                lookalike_run,
+                "https://chatgpt.com/g/g-p-6a991e8091dc819195e06f600822bd050-other"
+                "/c/6a98d663-fa60-83e8-9470-dd4056981f39",
+            )
+
     def test_invalid_project_url_is_rejected(self) -> None:
         invalid_urls = [
             "https://example.com/g/g-p-browser-loop-test/project",

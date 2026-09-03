@@ -131,9 +131,14 @@ export function conversationBelongsToProject(conversationUrl, projectUrl) {
   if (!conversation || !project || !isCanonicalConversationUrl(conversation)) return false;
   const conversationParts = new URL(conversation).pathname.split("/");
   const projectParts = new URL(project).pathname.split("/");
+  const projectId = projectParts[2];
+  const conversationProject = conversationParts[2];
+  const sameProject = conversationProject === projectId
+    || (/^g-p-[0-9a-f]{32}$/i.test(projectId)
+      && conversationProject.startsWith(`${projectId}-`));
   return conversationParts.length === 5
     && conversationParts[1] === "g"
-    && conversationParts[2] === projectParts[2];
+    && sameProject;
 }
 
 export function isChatGptSurfaceUrl(rawUrl) {
@@ -213,6 +218,24 @@ export function selectSendButton(snapshot) {
     return element.tag === "button" && element.inViewport !== false
       && element.enabled !== false && labels.some((item) => label.includes(item));
   });
+}
+
+export function assertNoBlockingNotice(pageSnapshot, renderedText = "") {
+  const dismissLabels = ["알겠습니다", "got it", "okay"];
+  const hasDismissControl = (pageSnapshot?.elements || []).some((element) => (
+    element.tag === "button"
+    && dismissLabels.includes(String(element.label || "").trim().toLocaleLowerCase())
+  ));
+  const pageText = String(renderedText).toLocaleLowerCase();
+  const hasRateLimitText = pageText.includes("요청이 너무 많습니다")
+    || pageText.includes("요청을 너무 빠르게 보내고 있습니다")
+    || pageText.includes("too many requests")
+    || pageText.includes("sending requests too quickly");
+  if (hasDismissControl && hasRateLimitText) {
+    const error = new Error("ChatGPT 요청 제한이 감지되어 자동 재시도를 중단했습니다.");
+    error.code = "rate_limit";
+    throw error;
+  }
 }
 
 export function resumeAutomationReport(existing, startedAt) {
@@ -310,7 +333,7 @@ async function connectBridge(bridgeRoot) {
   const tokenPath = path.join(homedir(), ".browser-bridge", "token");
   const token = readFileSync(tokenPath, "utf8").trim();
   const client = new clientModule.Client(
-    { name: "chatgpt-browser-loop", version: "0.5.0" },
+    { name: "chatgpt-browser-loop", version: "0.5.1" },
     { capabilities: {} },
   );
   const transport = new transportModule.StreamableHTTPClientTransport(
@@ -336,7 +359,10 @@ async function doctor(client) {
 }
 
 async function snapshot(client, tabId) {
-  return callTool(client, "snapshot", { tabId });
+  const pageSnapshot = await callTool(client, "snapshot", { tabId });
+  const page = await callTool(client, "get_page_text", { tabId });
+  assertNoBlockingNotice(pageSnapshot, page?.text);
+  return pageSnapshot;
 }
 
 async function currentTab(client, tabId) {
@@ -409,6 +435,7 @@ async function waitForComposerReady(client, tabId, deadline, expectedFilename, m
       lastResultCount = resultCount;
       if (stableSamples >= 2) return { pageSnapshot, composer };
     } catch (error) {
+      if (error.code === "rate_limit") throw error;
       lastError = error;
     }
     await sleep(750);
@@ -453,6 +480,8 @@ async function waitForConversationUrl(client, tabId, deadline, projectUrl = null
       return normalizeConversationUrl(tab.url);
     }
     const page = await callTool(client, "get_page_text", { tabId });
+    const pageSnapshot = await callTool(client, "snapshot", { tabId });
+    assertNoBlockingNotice(pageSnapshot, page?.text);
     if (isCanonicalConversationUrl(page?.url)) {
       if (projectUrl && !conversationBelongsToProject(page.url, projectUrl)) {
         throw new Error("새 대화가 지정한 ChatGPT 프로젝트 밖에서 생성됐습니다.");
@@ -550,6 +579,7 @@ export async function recoverPendingSubmission(client, action, pending, deadline
       return { conversationUrl, baselineResults: pending.baseline_results, recovered: true, tab };
     }
     const page = await callTool(client, "get_page_text", { tabId: tab.id });
+    assertNoBlockingNotice(pageSnapshot, page?.text);
     const refreshedTab = await currentTab(client, tab.id);
     const pageUrl = isCanonicalConversationUrl(page?.url)
       ? normalizeConversationUrl(page.url)

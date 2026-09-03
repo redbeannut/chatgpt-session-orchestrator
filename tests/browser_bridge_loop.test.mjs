@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  assertNoBlockingNotice,
   clickAndCaptureDownload,
   conversationBelongsToProject,
   expectedDownloadRegex,
@@ -27,6 +28,57 @@ import {
   uploadFile,
   validatePendingDownload,
 } from "../src/browser_bridge_loop.mjs";
+
+test("ChatGPT 요청 제한 안내는 즉시 rate_limit으로 중단한다", () => {
+  const quotedNotice = {
+    elements: [{ role: "textbox", label: "요청이 너무 많습니다", tag: "textarea" }],
+  };
+  assert.doesNotThrow(() => assertNoBlockingNotice(quotedNotice, "요청이 너무 많습니다"));
+  for (const renderedText of ["요청이 너무 많습니다", "Too many requests"]) {
+    assert.throws(
+      () => assertNoBlockingNotice(
+        { elements: [{ tag: "button", label: "알겠습니다" }] },
+        renderedText,
+      ),
+      (error) => error.code === "rate_limit" && /자동 재시도.*중단/.test(error.message),
+    );
+  }
+});
+
+test("보류 제출 복구에서도 요청 제한을 rate_limit으로 분류한다", async () => {
+  const conversationUrl = "https://chatgpt.com/c/6a98d663-fa60-83e8-9470-dd4056981f39";
+  const client = {
+    async callTool({ name }) {
+      if (name === "tabs_list") return mcpResult([{ id: 43, url: conversationUrl }]);
+      if (name === "snapshot") {
+        return mcpResult({ elements: [{ tag: "button", label: "알겠습니다", ref: 7 }] });
+      }
+      if (name === "get_page_text") {
+        return mcpResult({
+          url: conversationUrl,
+          text: "요청이 너무 많습니다\n요청을 너무 빠르게 보내고 있습니다.",
+        });
+      }
+      throw new Error(`예상하지 못한 도구 호출: ${name}`);
+    },
+  };
+  await assert.rejects(
+    recoverPendingSubmission(
+      client,
+      {
+        submission_key: "operation:initial:0",
+        conversation_url: conversationUrl,
+        project_url: null,
+        expected_download: "result.zip",
+        attachments: [],
+      },
+      { submission_key: "operation:initial:0", tab_id: 43, baseline_results: 0 },
+      Date.now() + 1000,
+      "unused",
+    ),
+    (error) => error.code === "rate_limit",
+  );
+});
 
 function mcpResult(value) {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
@@ -84,6 +136,15 @@ test("프로젝트 홈과 그 프로젝트의 대화만 허용한다", () => {
   assert.equal(normalizeProjectUrl("https://chatgpt.com/g//g-p-browser-loop-test/project"), null);
   assert.equal(normalizeProjectUrl("https://chatgpt.com/g/g-p-browser-loop-test/project//"), null);
   assert.equal(conversationBelongsToProject(conversationUrl, projectUrl), true);
+  const liveProjectUrl = "https://chatgpt.com/g/g-p-6a991e8091dc819195e06f600822bd05/project";
+  assert.equal(conversationBelongsToProject(
+    "https://chatgpt.com/g/g-p-6a991e8091dc819195e06f600822bd05-codex-browser-canary/c/6a98d663-fa60-83e8-9470-dd4056981f39",
+    liveProjectUrl,
+  ), true);
+  assert.equal(conversationBelongsToProject(
+    "https://chatgpt.com/g/g-p-6a991e8091dc819195e06f600822bd050-other/c/6a98d663-fa60-83e8-9470-dd4056981f39",
+    liveProjectUrl,
+  ), false);
   assert.equal(conversationBelongsToProject(
     "https://chatgpt.com/g/g-p-other/c/6a98d663-fa60-83e8-9470-dd4056981f39",
     projectUrl,
