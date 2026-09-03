@@ -169,6 +169,33 @@ conversation URL을 새 `prepared` 실행에 연결하므로 프로젝트 대화
 현재 자동 테스트는 3개 동시 임대·완료와 실패 후 작업자 해제를 검증한다. 실제 Chrome
 3개 탭 병렬 카나리는 프로젝트 홈 탭 ID를 지정한 뒤 별도로 수행한다.
 
+실사용은 작업자와 작업 명세 경로를 JSON manifest에 선언한 뒤 한 명령으로 실행한다.
+CLI는 누락된 `runDir`을 준비하고 브리지를 시작하며 라이브 제출 간격 60초 미만을
+거부한다. 모든 상대 경로는 manifest 파일 위치를 기준으로 해석한다. 최소 manifest는
+다음과 같고 같은 형식의 worker/job 쌍을 최대 3개까지 둔다.
+
+```json
+{
+  "schema_version": 1,
+  "state_dir": "../../runs/my-task/orchestrator",
+  "workers": [
+    {"worker_id": "research-a", "tab_id": 101, "project_url": "https://chatgpt.com/g/g-p-12345678901234567890123456789012/project", "capabilities": ["research"]}
+  ],
+  "jobs": [
+    {"run_dir": "../../runs/my-task/a", "spec": "worker-a.json", "worker_id": "research-a", "required_capabilities": ["research"]}
+  ]
+}
+```
+
+```powershell
+node src/orchestrator_cli.mjs --manifest plans/my-task/manifest.json
+```
+
+리서치 작업의 기본 ZIP 계약은 `report.md`와 `sources.md` 두 파일이다.
+`verifiers/markdown_research.py`는 두 파일의 존재, Markdown HTTP(S) 링크, 본문 인용과
+출처 목록의 일치를 검사한다. 이는 구조 검증이며 출처 내용의 진위 확인과 최종 종합은
+Codex가 로컬에서 수행한다.
+
 2026-09-03 실브라우저 카나리에서 ChatGPT가 프로젝트 대화 URL의 프로젝트 ID 뒤에
 이름 slug를 붙이는 실제 형식을 확인해 반영했다. 다른 프로젝트 prefix는 계속 차단한다.
 3개 재실행은 ChatGPT의 "요청이 너무 많습니다" 계정 제한으로 안전 중단했으며, 이제
