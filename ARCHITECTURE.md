@@ -64,9 +64,34 @@ URL은 `/c/<UUID>` 또는 `/g/<project>/c/<UUID>`만 인정한다. ChatGPT 파�
 ### 다중 작업자 확장 원칙
 
 Codex가 최종 답변과 로컬 검증을 소유하는 중앙 감독자이고, 프로젝트 안의 각 ChatGPT
-대화는 한 가지 산출물 계약만 맡는 작업자다. 첫 프로젝트 실사용 검증이 통과한 뒤에만
-`agent_id → conversation_url` 레지스트리와 최대 3개 작업의 의존성 순서를 추가한다.
-작업자끼리 직접 통신하거나 프로젝트 파일을 메시지 버스로 쓰는 기능은 추가하지 않는다.
+대화는 한 가지 산출물 계약만 맡는 작업자다. `src/orchestrator.mjs`가 최대 3개 작업자의
+`worker_id`, project URL, Chrome tab ID, capability와 마지막 conversation URL을
+관리한다. 작업자는 같은 project URL과 필요한 capability가 모두 맞을 때만 임대된다.
+
+`BrowserSessionAdapter`는 기존 `runLoop()`를 그대로 호출하는 얇은 경계다. worker가
+등록한 tab ID만 실행 옵션에 주입하므로 ZIP 다운로드·로컬 검증·feedback·실패 지문
+차단은 기존 경로를 재사용한다.
+
+조정 상태의 진실 원천은 ChatGPT DOM이나 프로젝트 파일이 아니라 하나의 coordinator가
+쓰는 `orchestrator-events.jsonl`이다. 다음 이벤트를 순서대로 재생하면 프로세스 재시작
+뒤에도 임대 상태와 완료 여부를 복구할 수 있다.
+
+```text
+WORKER_REGISTERED
+OPERATION_CREATED
+WORKER_LEASED
+OPERATION_STATE_CHANGED
+WORKER_BOUND
+WORKER_RELEASED
+```
+
+외부 작업 상태는 `CREATED → LEASED → RUNNING → COMPLETED | FAILED`로 제한한다.
+RUNNING 상태에서 프로세스가 종료되면 같은 operation을 다시 호출해 동일 worker와 기존
+`runDir`의 제출 저널을 재사용한다. 완료 이벤트 직후 중단된 경우에는 재호출 시 남은
+worker lease만 해제한다. 완료된 worker의 conversation URL은 다음 operation의 준비
+상태에 주입해 같은 프로젝트 대화를 이어간다. 실행 중 대화를 만든 뒤 실패한 경우도
+확인된 conversation URL을 worker에 먼저 기록하고 lease를 해제한다. 작업자끼리 직접 통신하거나 프로젝트
+파일을 메시지 버스로 쓰는 기능은 추가하지 않는다.
 
 ### 검증 어댑터
 

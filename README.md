@@ -124,6 +124,48 @@ powershell -ExecutionPolicy Bypass -File scripts/run_browser_loop.ps1 `
 `specs/command-loop-canary.json`을 복사해 프롬프트, 컨텍스트 파일, 결과 계약,
 로컬 검증 명령만 교체한다.
 
+## 최대 3개 작업자 오케스트레이션
+
+`src/orchestrator.mjs`는 기존 단일 브라우저 루프를 변경하지 않고 최대 3개의
+ChatGPT 작업자를 capability와 프로젝트 경계에 맞춰 임대한다. 하나의 coordinator
+프로세스가 `orchestrator-events.jsonl`을 소유하며, 재시작하면 이 append-only 로그를
+재생해 작업자·작업 상태를 복구한다.
+
+```javascript
+import { registerWorker, runOperations } from "./src/orchestrator.mjs";
+
+const stateDir = "runs/orchestrator";
+for (const [workerId, tabId] of [["research-a", 101], ["research-b", 102], ["research-c", 103]]) {
+  registerWorker(stateDir, {
+    workerId,
+    tabId,
+    projectUrl: "https://chatgpt.com/g/g-p-example/project",
+    capabilities: ["research"],
+  });
+}
+
+await runOperations({
+  stateDir,
+  jobs: ["runs/a", "runs/b", "runs/c"].map((runDir, index) => ({
+    runDir,
+    workerId: `research-${"abc"[index]}`,
+    requiredCapabilities: ["research"],
+  })),
+});
+```
+
+각 `runDir`은 기존 `harness.py prepare`로 먼저 준비하고, 작업 명세의
+`project_url`은 등록한 작업자의 프로젝트와 같아야 한다. 작업 상태는
+`CREATED → LEASED → RUNNING → COMPLETED | FAILED`로 기록된다. 내부 ZIP 검증과
+feedback 반복은 기존 하네스가 계속 담당한다. 완료된 작업을 다시 호출하면 브라우저에
+중복 제출하지 않고 기록된 완료 상태를 반환한다. 같은 worker의 다음 작업은 저장된
+conversation URL을 새 `prepared` 실행에 연결하므로 프로젝트 대화를 계속 사용한다.
+실행 중 대화를 만든 뒤 실패해도 확인된 conversation URL은 작업자에 보존한다.
+동일 operation의 프로세스 내 동시 실행은 거부한다.
+
+현재 자동 테스트는 3개 동시 임대·완료와 실패 후 작업자 해제를 검증한다. 실제 Chrome
+3개 탭 병렬 카나리는 프로젝트 홈 탭 ID를 지정한 뒤 별도로 수행한다.
+
 ## 상태 머신 수동 실행
 
 ```powershell

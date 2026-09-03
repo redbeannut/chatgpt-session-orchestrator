@@ -310,7 +310,7 @@ async function connectBridge(bridgeRoot) {
   const tokenPath = path.join(homedir(), ".browser-bridge", "token");
   const token = readFileSync(tokenPath, "utf8").trim();
   const client = new clientModule.Client(
-    { name: "chatgpt-browser-loop", version: "0.4.0" },
+    { name: "chatgpt-browser-loop", version: "0.5.0" },
     { capabilities: {} },
   );
   const transport = new transportModule.StreamableHTTPClientTransport(
