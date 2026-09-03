@@ -7,18 +7,23 @@ import test from "node:test";
 
 import {
   clickAndCaptureDownload,
+  conversationBelongsToProject,
   expectedDownloadRegex,
+  findConversationTab,
   isCanonicalConversationUrl,
   isChatGptDownloadUrl,
   isChatGptSurfaceUrl,
   isExpectedDownload,
   normalizeConversationUrl,
+  normalizeProjectUrl,
   parseArgs,
+  recoverPendingSubmission,
   resultElements,
   resumeAutomationReport,
   selectComposer,
   selectPreferredTab,
   selectSendButton,
+  submitAction,
   uploadFile,
   validatePendingDownload,
 } from "../src/browser_bridge_loop.mjs";
@@ -68,6 +73,113 @@ test("사용자가 지정한 탭은 ChatGPT 표면일 때만 선택한다", () =
     selectPreferredTab(tabs, 1, "https://chatgpt.com/c/6a98d663-fa60-83e8-9470-dd4056981f39"),
     null,
   );
+});
+
+test("프로젝트 홈과 그 프로젝트의 대화만 허용한다", () => {
+  const projectUrl = "https://chatgpt.com/g/g-p-browser-loop-test/project";
+  const conversationUrl = "https://chatgpt.com/g/g-p-browser-loop-test/c/6a98d663-fa60-83e8-9470-dd4056981f39";
+  assert.equal(normalizeProjectUrl(`${projectUrl}?view=all#main`), projectUrl);
+  assert.equal(normalizeProjectUrl("https://chatgpt.com/g/g-custom"), null);
+  assert.equal(normalizeProjectUrl("https://USER@chatgpt.com/g/g-p-browser-loop-test/project"), null);
+  assert.equal(normalizeProjectUrl("https://chatgpt.com/g//g-p-browser-loop-test/project"), null);
+  assert.equal(normalizeProjectUrl("https://chatgpt.com/g/g-p-browser-loop-test/project//"), null);
+  assert.equal(conversationBelongsToProject(conversationUrl, projectUrl), true);
+  assert.equal(conversationBelongsToProject(
+    "https://chatgpt.com/g/g-p-other/c/6a98d663-fa60-83e8-9470-dd4056981f39",
+    projectUrl,
+  ), false);
+
+  const tabs = [
+    { id: 2, url: "https://chatgpt.com/" },
+    { id: 3, url: projectUrl },
+  ];
+  assert.throws(() => selectPreferredTab(tabs, 2, null, projectUrl), /프로젝트 홈이 아닙니다/);
+  assert.equal(selectPreferredTab(tabs, 3, null, projectUrl).id, 3);
+});
+
+test("새 작업 탭은 명시한 프로젝트 홈에서 연다", async () => {
+  const projectUrl = "https://chatgpt.com/g/g-p-browser-loop-test/project";
+  const calls = [];
+  let openedUrl = null;
+  const client = {
+    async callTool(request) {
+      calls.push(request);
+      if (request.name === "tabs_list") {
+        return mcpResult(openedUrl ? [{ id: 41, url: openedUrl }] : []);
+      }
+      if (request.name === "tab_new") {
+        openedUrl = request.arguments.url;
+        return mcpResult({ id: 41, url: openedUrl });
+      }
+      throw new Error(`예상하지 못한 도구 호출: ${request.name}`);
+    },
+  };
+  const tab = await findConversationTab(client, null, null, projectUrl);
+  assert.deepEqual(tab, { id: 41, url: projectUrl });
+  assert.equal(calls.find((call) => call.name === "tab_new").arguments.url, projectUrl);
+});
+
+test("프로젝트 탭이 홈으로 리디렉션되면 신규·재개 전송을 차단한다", async () => {
+  const projectUrl = "https://chatgpt.com/g/g-p-browser-loop-test/project";
+  const conversationUrl = "https://chatgpt.com/g/g-p-browser-loop-test/c/6a98d663-fa60-83e8-9470-dd4056981f39";
+  for (const savedConversation of [null, conversationUrl]) {
+    let opened = false;
+    const calls = [];
+    const client = {
+      async callTool(request) {
+        calls.push(request);
+        if (request.name === "tabs_list") {
+          return mcpResult(opened ? [{ id: 42, url: "https://chatgpt.com/" }] : []);
+        }
+        if (request.name === "tab_new") {
+          opened = true;
+          return mcpResult({ id: 42, url: request.arguments.url });
+        }
+        throw new Error(`예상하지 못한 도구 호출: ${request.name}`);
+      },
+    };
+    await assert.rejects(
+      findConversationTab(client, savedConversation, null, projectUrl),
+      /프로젝트 범위가 아닙니다/,
+    );
+    assert.equal(calls.some((call) => ["fill", "file_upload", "click"].includes(call.name)), false);
+  }
+});
+
+test("탭이 전송 직전에 범위를 벗어나면 신규·보류 제출 모두 무동작으로 끝난다", async () => {
+  const projectUrl = "https://chatgpt.com/g/g-p-browser-loop-test/project";
+  const action = {
+    action: "submit_initial",
+    submission_key: "operation:initial:0",
+    conversation_url: null,
+    project_url: projectUrl,
+    expected_download: "result.zip",
+    attachments: [],
+    prompt: "test",
+  };
+  const calls = [];
+  const client = {
+    async callTool(request) {
+      calls.push(request);
+      if (request.name === "tabs_list") return mcpResult([{ id: 43, url: "https://chatgpt.com/" }]);
+      throw new Error(`범위 확인 뒤 호출되면 안 되는 도구: ${request.name}`);
+    },
+  };
+  await assert.rejects(
+    submitAction(client, { id: 43 }, action, Date.now() + 1000, "unused", 0),
+    /프로젝트 범위가 아닙니다/,
+  );
+  await assert.rejects(
+    recoverPendingSubmission(
+      client,
+      action,
+      { submission_key: action.submission_key, tab_id: 43 },
+      Date.now() + 1000,
+      "unused",
+    ),
+    /프로젝트 범위가 아닙니다/,
+  );
+  assert.equal(calls.some((call) => ["fill", "file_upload", "click"].includes(call.name)), false);
 });
 
 test("결과 버튼은 기대 파일명이 포함된 링크나 버튼만 고른다", () => {

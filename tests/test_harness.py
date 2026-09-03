@@ -14,6 +14,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 CHAT_URL = "https://chatgpt.com/c/6a98d663-fa60-83e8-9470-dd4056981f39"
 OTHER_CHAT_URL = "https://chatgpt.com/c/6a98f8c7-adfc-83ee-b8cb-b0446ad5b41b"
+PROJECT_URL = "https://chatgpt.com/g/g-p-browser-loop-test/project"
+PROJECT_CHAT_URL = "https://chatgpt.com/g/g-p-browser-loop-test/c/6a98d663-fa60-83e8-9470-dd4056981f39"
 
 import harness  # noqa: E402
 
@@ -104,6 +106,40 @@ class HarnessTests(unittest.TestCase):
 
     def test_conversation_url_is_canonicalized(self) -> None:
         self.assertEqual(harness.validate_chatgpt_url(f"{CHAT_URL}?x=1#main"), CHAT_URL)
+
+    def test_project_url_is_stored_and_conversation_is_scoped(self) -> None:
+        spec = json.loads((PROJECT_ROOT / "specs" / "command-canary.json").read_text(encoding="utf-8"))
+        spec["project_url"] = f"{PROJECT_URL}?view=all#main"
+        spec["context_files"][0]["source"] = str(PROJECT_ROOT / "fixtures" / "broken.txt")
+        spec_path = self.root / "project-spec.json"
+        spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        project_run = self.root / "project-run"
+        state = harness.prepare(
+            project_run,
+            PROJECT_ROOT / "fixtures" / "broken.txt",
+            spec_path,
+        )
+        self.assertEqual(state["project_url"], PROJECT_URL)
+        self.assertEqual(harness.next_action(project_run)["project_url"], PROJECT_URL)
+        with self.assertRaises(harness.ContractError):
+            harness.record_session(project_run, CHAT_URL)
+        recorded = harness.record_session(project_run, PROJECT_CHAT_URL)
+        self.assertEqual(recorded["conversation_url"], PROJECT_CHAT_URL)
+
+    def test_invalid_project_url_is_rejected(self) -> None:
+        invalid_urls = [
+            "https://example.com/g/g-p-browser-loop-test/project",
+            "https://chatgpt.com/g/g-p-browser-loop-test",
+            "https://chatgpt.com/g/../project",
+            "https://chatgpt.com/g//g-p-browser-loop-test/project",
+            "https://chatgpt.com//g/g-p-browser-loop-test/project",
+            "https://chatgpt.com/g/g-p-browser-loop-test/project//",
+            "https://USER@chatgpt.com/g/g-p-browser-loop-test/project",
+            "https://chatgpt.com/g/g-p-browser-loop-test/c/6a98d663-fa60-83e8-9470-dd4056981f39",
+        ]
+        for invalid_url in invalid_urls:
+            with self.subTest(invalid_url=invalid_url), self.assertRaises(harness.ContractError):
+                harness.validate_chatgpt_project_url(invalid_url)
 
     def test_next_action_and_submission_keys_are_idempotent(self) -> None:
         fresh_run = self.root / "fresh-run"

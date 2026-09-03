@@ -162,6 +162,11 @@ def load_task_spec(spec_path: Path | None, fixture_path: Path) -> dict:
         raise ContractError("작업 계약에 name이 필요합니다.")
     if not isinstance(spec.get("prompt"), str) or not spec["prompt"].strip():
         raise ContractError("작업 계약에 prompt가 필요합니다.")
+    project_url = spec.get("project_url")
+    if project_url is not None:
+        if not isinstance(project_url, str) or not project_url.strip():
+            raise ContractError("project_url은 비어 있지 않은 문자열이어야 합니다.")
+        project_url = validate_chatgpt_project_url(project_url)
     context_files = spec.get("context_files", [])
     if not isinstance(context_files, list):
         raise ContractError("context_files는 배열이어야 합니다.")
@@ -252,6 +257,7 @@ def load_task_spec(spec_path: Path | None, fixture_path: Path) -> dict:
         "result": normalized_result,
         "verifier": normalized_verifier,
         "max_attempts": max_attempts,
+        "project_url": project_url,
         "spec_source": str(spec_path.resolve()),
     }
 
@@ -292,6 +298,7 @@ def prepare(run_dir: Path, fixture_path: Path, spec_path: Path | None = None) ->
         "attempts": [],
         "submissions": [],
         "conversation_url": None,
+        "project_url": task_spec.get("project_url"),
         "context_zip": str(context_zip.resolve()),
         "context_sha256": sha256_file(context_zip),
         "prompt_file": str(prompt_path.resolve()),
@@ -304,17 +311,24 @@ def prepare(run_dir: Path, fixture_path: Path, spec_path: Path | None = None) ->
     return state
 
 
-def validate_chatgpt_url(url: str) -> str:
+def parse_chatgpt_path(url: str, label: str) -> tuple[str, list[str]]:
     raw = url.strip()
-    if any(char.isspace() for char in raw):
-        raise ContractError("ChatGPT 대화 URL에 공백이 있습니다.")
+    if any(char.isspace() for char in raw) or not raw.startswith("https://chatgpt.com/"):
+        raise ContractError(f"정식 ChatGPT {label} URL만 사용할 수 있습니다.")
     parsed = urlsplit(raw)
     if parsed.scheme != "https" or parsed.netloc != "chatgpt.com":
-        raise ContractError("정식 ChatGPT 대화 URL만 기록할 수 있습니다.")
-    decoded_path = unquote(parsed.path).rstrip("/")
-    parts = [part for part in decoded_path.split("/") if part]
-    if any(part in {".", ".."} for part in parts):
-        raise ContractError("ChatGPT 대화 URL에 dot-segment 경로를 사용할 수 없습니다.")
+        raise ContractError(f"정식 ChatGPT {label} URL만 사용할 수 있습니다.")
+    decoded_path = unquote(parsed.path)
+    if decoded_path.endswith("/"):
+        decoded_path = decoded_path[:-1]
+    parts = decoded_path[1:].split("/") if decoded_path.startswith("/") else []
+    if not parts or any(not part or part in {".", ".."} for part in parts):
+        raise ContractError(f"ChatGPT {label} URL 경로가 올바르지 않습니다.")
+    return decoded_path, parts
+
+
+def validate_chatgpt_url(url: str) -> str:
+    decoded_path, parts = parse_chatgpt_path(url, "대화")
     if len(parts) == 2 and parts[0] == "c":
         conversation_id = parts[1]
     elif len(parts) == 4 and parts[0] == "g" and parts[2] == "c":
@@ -330,6 +344,18 @@ def validate_chatgpt_url(url: str) -> str:
     return urlunsplit(("https", "chatgpt.com", decoded_path, "", ""))
 
 
+def validate_chatgpt_project_url(url: str) -> str:
+    decoded_path, parts = parse_chatgpt_path(url, "프로젝트")
+    if (
+        len(parts) != 3
+        or parts[0] != "g"
+        or parts[2] != "project"
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", parts[1])
+    ):
+        raise ContractError("ChatGPT 프로젝트 홈 URL 형식이 아닙니다.")
+    return urlunsplit(("https", "chatgpt.com", decoded_path, "", ""))
+
+
 def record_submission(run_dir: Path, url: str, kind: str) -> dict:
     state_path = run_dir / "state.json"
     state = read_json(state_path)
@@ -337,6 +363,12 @@ def record_submission(run_dir: Path, url: str, kind: str) -> dict:
     existing = state.get("conversation_url")
     if existing and existing != normalized:
         raise ContractError("이미 기록된 대화와 다른 URL로 변경할 수 없습니다.")
+    project_url = state.get("project_url")
+    if project_url:
+        project_parts = urlsplit(project_url).path.strip("/").split("/")
+        conversation_parts = urlsplit(normalized).path.strip("/").split("/")
+        if len(conversation_parts) != 4 or conversation_parts[:2] != project_parts[:2]:
+            raise ContractError("지정한 ChatGPT 프로젝트에 속한 대화가 아닙니다.")
     if kind not in {"initial", "feedback"}:
         raise ContractError("제출 종류는 initial 또는 feedback이어야 합니다.")
     if kind == "initial":
@@ -384,6 +416,7 @@ def next_action(run_dir: Path) -> dict:
         "schema_version": 1,
         "operation_id": state["operation_id"],
         "conversation_url": state.get("conversation_url"),
+        "project_url": state.get("project_url"),
         "status": status,
     }
     if status == "prepared":

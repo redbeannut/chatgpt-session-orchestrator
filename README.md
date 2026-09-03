@@ -74,6 +74,19 @@ Codex가 로그인된 Chrome의 ChatGPT 대화를 조작하고, 생성된 ZIP을
 
 `specs/command-canary.json`처럼 작업마다 다음 항목을 선언한다.
 
+특정 ChatGPT 프로젝트에서 새 대화를 시작하려면 작업 명세 최상위에 주소창에서
+복사한 프로젝트 홈 URL을 추가한다.
+
+```json
+{
+  "project_url": "https://chatgpt.com/g/g-p-example/project"
+}
+```
+
+실행기는 프로젝트 홈에서만 최초 요청을 제출하고, 생성된 대화가 같은
+`/g/<project>/c/<UUID>` 범위에 속하는지 확인한다. 일반 ChatGPT 탭이나 다른
+프로젝트 탭을 `-TabId`로 지정하면 전송 전에 중단한다.
+
 - ChatGPT에 보낼 프롬프트와 컨텍스트 파일 목록.
 - 기대하는 결과 ZIP 이름과 필수·허용 파일 집합.
 - `exact_text` 또는 로컬 `command` 검증기.

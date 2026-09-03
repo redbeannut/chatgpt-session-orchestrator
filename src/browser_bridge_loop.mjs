@@ -75,11 +75,22 @@ export function isExpectedDownload(filename, expected) {
   return expectedDownloadRegex(expected).test(filename) && !filename.endsWith(".crdownload");
 }
 
-export function normalizeConversationUrl(rawUrl) {
+function strictChatGptUrl(rawUrl) {
   if (!rawUrl) return null;
+  const raw = String(rawUrl).trim();
+  if (!raw.startsWith("https://chatgpt.com/")) return null;
   try {
-    const url = new URL(rawUrl);
-    if (url.origin !== "https://chatgpt.com") return null;
+    const url = new URL(raw);
+    return !url.username && !url.password && !url.port ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeConversationUrl(rawUrl) {
+  try {
+    const url = strictChatGptUrl(rawUrl);
+    if (!url) return null;
     const decodedPath = decodeURIComponent(url.pathname).replace(/\/$/, "");
     url.search = "";
     url.hash = "";
@@ -99,25 +110,58 @@ export function isCanonicalConversationUrl(rawUrl) {
     || new RegExp(`^/g/[^/]+/c/${uuid}$`, "i").test(url.pathname);
 }
 
-export function isChatGptSurfaceUrl(rawUrl) {
+export function normalizeProjectUrl(rawUrl) {
   try {
-    return new URL(rawUrl).origin === "https://chatgpt.com";
+    const url = strictChatGptUrl(rawUrl);
+    if (!url) return null;
+    const decodedPath = decodeURIComponent(url.pathname).replace(/\/$/, "");
+    if (!/^\/g\/[A-Za-z0-9_-]+\/project$/.test(decodedPath)) return null;
+    url.search = "";
+    url.hash = "";
+    url.pathname = decodedPath;
+    return url.href.replace(/\/$/, "");
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function conversationBelongsToProject(conversationUrl, projectUrl) {
+  const conversation = normalizeConversationUrl(conversationUrl);
+  const project = normalizeProjectUrl(projectUrl);
+  if (!conversation || !project || !isCanonicalConversationUrl(conversation)) return false;
+  const conversationParts = new URL(conversation).pathname.split("/");
+  const projectParts = new URL(project).pathname.split("/");
+  return conversationParts.length === 5
+    && conversationParts[1] === "g"
+    && conversationParts[2] === projectParts[2];
+}
+
+export function isChatGptSurfaceUrl(rawUrl) {
+  return strictChatGptUrl(rawUrl) !== null;
 }
 
 export function isChatGptDownloadUrl(rawUrl) {
   try {
-    const url = new URL(rawUrl);
-    return url.origin === "https://chatgpt.com"
-      && url.pathname.startsWith("/backend-api/estuary/content");
+    const url = strictChatGptUrl(rawUrl);
+    return Boolean(url?.pathname.startsWith("/backend-api/estuary/content"));
   } catch {
     return false;
   }
 }
 
-export function selectPreferredTab(tabs, preferredTabId, conversationUrl) {
+export function tabMatchesActionScope(tabUrl, conversationUrl, projectUrl, allowProjectConversation = false) {
+  if (conversationUrl) {
+    return normalizeConversationUrl(tabUrl) === normalizeConversationUrl(conversationUrl)
+      && (!projectUrl || conversationBelongsToProject(tabUrl, projectUrl));
+  }
+  if (projectUrl) {
+    return normalizeProjectUrl(tabUrl) === normalizeProjectUrl(projectUrl)
+      || (allowProjectConversation && conversationBelongsToProject(tabUrl, projectUrl));
+  }
+  return isChatGptSurfaceUrl(tabUrl);
+}
+
+export function selectPreferredTab(tabs, preferredTabId, conversationUrl, projectUrl = null) {
   if (preferredTabId === null) return null;
   const preferred = tabs.find((tab) => tab.id === preferredTabId);
   if (!preferred && !conversationUrl) {
@@ -125,6 +169,14 @@ export function selectPreferredTab(tabs, preferredTabId, conversationUrl) {
   }
   if (preferred && !isChatGptSurfaceUrl(preferred.url) && !conversationUrl) {
     throw new Error(`지정한 탭은 ChatGPT 탭이 아닙니다: ${preferred.url}`);
+  }
+  const normalizedProject = normalizeProjectUrl(projectUrl);
+  if (projectUrl && !normalizedProject) {
+    throw new Error(`ChatGPT 프로젝트 홈 URL이 올바르지 않습니다: ${projectUrl}`);
+  }
+  if (preferred && !conversationUrl && normalizedProject
+      && normalizeProjectUrl(preferred.url) !== normalizedProject) {
+    throw new Error(`지정한 탭은 요청한 ChatGPT 프로젝트 홈이 아닙니다: ${preferred.url}`);
   }
   const normalizedConversation = normalizeConversationUrl(conversationUrl);
   if (preferred && (!conversationUrl
@@ -258,7 +310,7 @@ async function connectBridge(bridgeRoot) {
   const tokenPath = path.join(homedir(), ".browser-bridge", "token");
   const token = readFileSync(tokenPath, "utf8").trim();
   const client = new clientModule.Client(
-    { name: "chatgpt-browser-loop", version: "0.3.1" },
+    { name: "chatgpt-browser-loop", version: "0.4.0" },
     { capabilities: {} },
   );
   const transport = new transportModule.StreamableHTTPClientTransport(
@@ -292,10 +344,31 @@ async function currentTab(client, tabId) {
   return tabs.find((tab) => tab.id === tabId) || null;
 }
 
-async function findConversationTab(client, conversationUrl, preferredTabId) {
+export async function assertActionTabScope(client, tabId, action, allowProjectConversation = false) {
+  const tab = await currentTab(client, tabId);
+  if (!tab || !tabMatchesActionScope(
+    tab.url,
+    action.conversation_url,
+    action.project_url,
+    allowProjectConversation,
+  )) {
+    throw new Error(`현재 탭이 요청한 ChatGPT 대화 또는 프로젝트 범위가 아닙니다: ${tab?.url || "missing"}`);
+  }
+  return tab;
+}
+
+export async function findConversationTab(client, conversationUrl, preferredTabId, projectUrl = null) {
   const tabs = await callTool(client, "tabs_list", { short: false });
   const normalizedConversation = normalizeConversationUrl(conversationUrl);
-  const preferred = selectPreferredTab(tabs, preferredTabId, conversationUrl);
+  const normalizedProject = normalizeProjectUrl(projectUrl);
+  if (projectUrl && !normalizedProject) {
+    throw new Error(`ChatGPT 프로젝트 홈 URL이 올바르지 않습니다: ${projectUrl}`);
+  }
+  if (conversationUrl && normalizedProject
+      && !conversationBelongsToProject(conversationUrl, normalizedProject)) {
+    throw new Error("기록된 대화가 지정한 ChatGPT 프로젝트에 속하지 않습니다.");
+  }
+  const preferred = selectPreferredTab(tabs, preferredTabId, conversationUrl, normalizedProject);
   if (preferred) return preferred;
   if (conversationUrl) {
     const exact = tabs.find((tab) => normalizeConversationUrl(tab.url) === normalizedConversation);
@@ -305,12 +378,19 @@ async function findConversationTab(client, conversationUrl, preferredTabId) {
     if (!Number.isInteger(reopenedId)) {
       throw new Error(`기록된 ChatGPT 대화 탭을 다시 열지 못했습니다: ${conversationUrl}`);
     }
-    return { id: reopenedId, url: normalizedConversation };
+    return assertActionTabScope(client, reopenedId, {
+      conversation_url: normalizedConversation,
+      project_url: normalizedProject,
+    });
   }
-  const created = await callTool(client, "tab_new", { url: "https://chatgpt.com/" });
+  const startUrl = normalizedProject || "https://chatgpt.com/";
+  const created = await callTool(client, "tab_new", { url: startUrl });
   const createdId = Number(created?.id ?? created?.tabId);
   if (!Number.isInteger(createdId)) throw new Error("새 ChatGPT 탭 ID를 받지 못했습니다.");
-  return { id: createdId, url: "https://chatgpt.com/" };
+  return assertActionTabScope(client, createdId, {
+    conversation_url: null,
+    project_url: normalizedProject,
+  });
 }
 
 async function waitForComposerReady(client, tabId, deadline, expectedFilename, minimumResults = 0) {
@@ -363,18 +443,29 @@ async function waitForSendButton(client, tabId, deadline) {
   throw new Error("첨부 완료 후 ChatGPT 전송 버튼이 활성화되지 않았습니다.");
 }
 
-async function waitForConversationUrl(client, tabId, deadline) {
+async function waitForConversationUrl(client, tabId, deadline, projectUrl = null) {
   while (Date.now() < deadline) {
     const tab = await currentTab(client, tabId);
-    if (isCanonicalConversationUrl(tab?.url)) return normalizeConversationUrl(tab.url);
+    if (isCanonicalConversationUrl(tab?.url)) {
+      if (projectUrl && !conversationBelongsToProject(tab.url, projectUrl)) {
+        throw new Error("새 대화가 지정한 ChatGPT 프로젝트 밖에서 생성됐습니다.");
+      }
+      return normalizeConversationUrl(tab.url);
+    }
     const page = await callTool(client, "get_page_text", { tabId });
-    if (isCanonicalConversationUrl(page?.url)) return normalizeConversationUrl(page.url);
+    if (isCanonicalConversationUrl(page?.url)) {
+      if (projectUrl && !conversationBelongsToProject(page.url, projectUrl)) {
+        throw new Error("새 대화가 지정한 ChatGPT 프로젝트 밖에서 생성됐습니다.");
+      }
+      return normalizeConversationUrl(page.url);
+    }
     await sleep(750);
   }
   throw new Error("새 ChatGPT 대화 URL을 확인하지 못했습니다.");
 }
 
-async function submitAction(client, tab, action, deadline, runDir, minimumResults) {
+export async function submitAction(client, tab, action, deadline, runDir, minimumResults) {
+  await assertActionTabScope(client, tab.id, action);
   const { pageSnapshot, composer } = await waitForComposerReady(
     client,
     tab.id,
@@ -402,13 +493,16 @@ async function submitAction(client, tab, action, deadline, runDir, minimumResult
     created_at: new Date().toISOString(),
   };
   writeJson(pendingPath, pending);
+  await assertActionTabScope(client, tab.id, action);
   await callTool(client, "fill", { tabId: tab.id, ref: composer.textbox.ref, value: prompt });
   for (const attachment of action.attachments || []) {
+    await assertActionTabScope(client, tab.id, action);
     await uploadFile(client, tab.id, composer.fileInput?.ref, attachment);
   }
   const send = await waitForSendButton(client, tab.id, deadline);
   pending.stage = "ready";
   writeJson(pendingPath, pending);
+  await assertActionTabScope(client, tab.id, action);
   await callTool(client, "click", { tabId: tab.id, ref: send.ref, timeoutMs: 10_000 });
   pending.stage = "clicked";
   writeJson(pendingPath, pending);
@@ -416,18 +510,15 @@ async function submitAction(client, tab, action, deadline, runDir, minimumResult
     throw new Error("테스트 실패 지점: ChatGPT 전송 직후");
   }
   const conversationUrl = action.conversation_url
-    || await waitForConversationUrl(client, tab.id, deadline);
+    || await waitForConversationUrl(client, tab.id, deadline, action.project_url);
   return { conversationUrl, baselineResults, recovered: false };
 }
 
-async function recoverPendingSubmission(client, action, pending, deadline, runDir) {
+export async function recoverPendingSubmission(client, action, pending, deadline, runDir) {
   if (pending.submission_key !== action.submission_key) {
     throw new Error("현재 제출 키와 보류된 브라우저 제출 키가 다릅니다.");
   }
-  const tab = await currentTab(client, Number(pending.tab_id));
-  if (!tab || !isChatGptSurfaceUrl(tab.url)) {
-    throw new Error("보류된 제출의 ChatGPT 탭을 찾지 못해 중복 제출을 차단했습니다.");
-  }
+  const tab = await assertActionTabScope(client, Number(pending.tab_id), action, true);
   const recoveryDeadline = Math.min(deadline, Date.now() + 15_000);
   while (Date.now() < recoveryDeadline) {
     let pageSnapshot = await snapshot(client, tab.id);
@@ -443,17 +534,19 @@ async function recoverPendingSubmission(client, action, pending, deadline, runDi
           (element) => String(element.label || "").includes(filename),
         );
         if (!attached) {
+          await assertActionTabScope(client, tab.id, action, true);
           const composer = selectComposer(pageSnapshot);
           await uploadFile(client, tab.id, composer.fileInput?.ref, attachment);
           pageSnapshot = await snapshot(client, tab.id);
         }
       }
       const send = await waitForSendButton(client, tab.id, deadline);
+      await assertActionTabScope(client, tab.id, action, true);
       await callTool(client, "click", { tabId: tab.id, ref: send.ref, timeoutMs: 10_000 });
       pending.stage = "clicked_after_recovery";
       writeJson(path.join(runDir, PENDING_SUBMISSION_FILE), pending);
       const conversationUrl = action.conversation_url
-        || await waitForConversationUrl(client, tab.id, deadline);
+        || await waitForConversationUrl(client, tab.id, deadline, action.project_url);
       return { conversationUrl, baselineResults: pending.baseline_results, recovered: true, tab };
     }
     const page = await callTool(client, "get_page_text", { tabId: tab.id });
@@ -642,7 +735,12 @@ export async function runLoop(options) {
           );
           tab = submitted.tab;
         } else {
-          tab = await findConversationTab(client, state.conversation_url, preferredTabId);
+          tab = await findConversationTab(
+            client,
+            state.conversation_url,
+            preferredTabId,
+            action.project_url,
+          );
           submitted = await submitAction(
             client,
             tab,
@@ -688,6 +786,7 @@ export async function runLoop(options) {
         client,
         state.conversation_url,
         Number(pendingDownload.tab_id),
+        action.project_url,
       );
       preferredTabId = tab.id;
       const resultElement = await waitForResult(
