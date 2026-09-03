@@ -15,8 +15,9 @@ Codex가 로그인된 Chrome의 ChatGPT 대화를 조작하고, 생성된 ZIP을
 5. 같은 ChatGPT 대화에 피드백을 제출한다.
 6. 두 번째 `result.zip`이 로컬 검증을 통과해야 한다.
 
-브라우저 전송은 현재 Codex Chrome 브리지로 검증한다. 상태와 ZIP 계약은
-브리지에 종속되지 않으므로 이후 `browser-bridge` 전송 어댑터를 붙일 수 있다.
+브라우저 전송은 `browser-bridge`로 로그인된 Chrome을 제어한다. 상태와 ZIP 계약은
+브리지에 종속되지 않으며, Codex는 `next-action`에 따라 업로드·다운로드·후속 제출을
+수행한다.
 
 ## 실측 결과
 
@@ -30,15 +31,21 @@ Codex가 로그인된 Chrome의 ChatGPT 대화를 조작하고, 생성된 ZIP을
 | 수정 결과 다운로드 | 성공 | SHA-256 `956ae3727f55cfaee9e14ceda1188d17cec9a6fadfc08def317580285887a515` |
 | 두 번째 로컬 검증 | 통과 | 종료 코드 `0`, 상태 `verified` |
 
-현재 Codex Chrome 브리지는 다운로드와 동일 대화 후속 요청을 처리했지만,
-프로그램 방식 파일 선택은 Vault 경로와 로컬 다운로드 경로 모두 `Not allowed`로
-거부했다. 그래서 이번 실행의 `context.zip`과 `feedback.zip` 내용은 본문에
-인라인으로 전달했다. 상태 머신·안전한 ZIP 검증·실패 후 재시도는 실증됐지만,
-무인 파일 업로드는 아직 통과하지 않았다.
+2026-09-03에는 `browser-bridge`의 실제 파일 입력을 사용해 `bridge-live-001` 전체
+왕복을 다시 실행했다.
 
-다음 단계는 현재 상태 머신을 유지한 채 `browser-bridge`와
-`codex-chatgpt-control`을 전송 계층으로 연결하고, 같은 계약으로 업로드까지
-다시 검증하는 것이다. 특정 문서 형식은 이후 작업별 검증기 중 하나일 뿐이다.
+| 단계 | 결과 | 증거 |
+| --- | --- | --- |
+| `context.zip` 업로드 | 성공 | 509바이트 파일이 로그인된 Chrome의 새 ChatGPT 대화에 첨부됨 |
+| 최초 요청 제출 | 성공 | 대화 URL `https://chatgpt.com/c/6a98d663-fa60-83e8-9470-dd4056981f39` 고정 |
+| 첫 결과 다운로드 | 성공 | SHA-256 `afe6cb62d6037aa2e1ed0d3232293aa9125c89e80b0336715b8251bf91555050` |
+| 첫 로컬 검증 | 의도대로 실패 | 종료 코드 `2`, `feedback-001.zip` 자동 생성 |
+| 같은 대화 피드백 업로드 | 성공 | 1,070바이트 `feedback.zip` 첨부 후 동일 URL에 제출 |
+| 수정 결과 다운로드 | 성공 | SHA-256 `c6db9755466c3eb2aeba2b5a021a7e5d98cf41cbf2088a8cae363f177e66c72a` |
+| 두 번째 로컬 검증 | 통과 | 종료 코드 `0`, 최종 상태 `verified` |
+
+따라서 파일 내용을 본문에 대신 넣지 않고도 실제 업로드·다운로드·로컬 검증·동일
+대화 수정 요청이 모두 동작한다. 특정 문서 형식은 이후 작업별 검증기 중 하나다.
 
 ## 범용 작업 계약
 
@@ -74,19 +81,19 @@ python src/harness.py verify --run-dir runs/task-001 --result-zip runs/task-001/
 실패 뒤 `next-action`은 `submit_feedback`과 고유 제출 키를 반환한다. 실제 제출 뒤
 `record-submission --kind feedback`을 기록하면 다시 `await_download` 상태가 된다.
 
-## Browser Bridge 준비 상태
+## Browser Bridge 검증 상태
 
 - 소스와 빌드는 `C:\Users\admin\tools\browser-bridge`에 설치했다.
 - 로컬 서버는 `127.0.0.1:8765`에서 동작한다.
 - 토큰은 저장소 밖 `C:\Users\admin\.browser-bridge\token`에 있다.
 - Codex MCP `browser-bridge`와 ChatGPT Surface Control 플러그인을 등록했다.
 - 재기동은 `powershell -File scripts/start_browser_bridge.ps1`로 수행한다.
+- Chrome 확장 0.16.0을 등록했고 health의 `extensionConnected: true`를 확인했다.
+- `bridge-live-001`에서 컨텍스트와 피드백의 실제 파일 업로드를 확인했다.
 
-Chrome 보안 정책 때문에 `chrome://extensions`의 압축 해제 확장 등록은 사용자가
-한 번 직접 해야 한다. 등록할 폴더는
-`C:\Users\admin\tools\browser-bridge\extension`이며, 옵션 화면에는 위 토큰 파일의
-내용을 붙여넣고 **Save & connect**를 누른다. 연결 후 health의
-`extensionConnected`가 `true`여야 실제 파일 업로드 재검증을 시작한다.
+Chrome 재설치나 프로필 변경으로 확장이 사라진 경우에만
+`C:\Users\admin\tools\browser-bridge\extension`을 압축 해제 확장으로 다시 등록하고,
+옵션 화면에서 위 토큰 파일로 **Save & connect**를 수행한다.
 
 첫 검증 실패의 종료 코드는 `2`다. 인프라 또는 계약 오류는 `1`, 통과는 `0`이다.
 
