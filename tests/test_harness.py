@@ -148,6 +148,21 @@ class HarnessTests(unittest.TestCase):
         state = json.loads((command_run / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "feedback_ready")
 
+    def test_repeated_command_failure_stops_loop(self) -> None:
+        command_run = self.root / "repeated-command-failure"
+        harness.prepare(
+            command_run,
+            PROJECT_ROOT / "fixtures" / "broken.txt",
+            PROJECT_ROOT / "specs" / "command-canary.json",
+        )
+        harness.record_session(command_run, "https://chatgpt.com/c/repeated-command-failure")
+        first, _ = harness.verify(command_run, self.write_result("same command failure\n"))
+        second, _ = harness.verify(command_run, self.write_result("same command failure\n"))
+        self.assertEqual(first["failure_fingerprint"], second["failure_fingerprint"])
+        state = json.loads((command_run / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "stopped")
+        self.assertEqual(state["stop_reason"], "repeated_failure")
+
     def test_invalid_spec_does_not_leave_run_directory(self) -> None:
         invalid_spec = self.root / "invalid-spec.json"
         invalid_spec.write_text('{"schema_version": 1}', encoding="utf-8")

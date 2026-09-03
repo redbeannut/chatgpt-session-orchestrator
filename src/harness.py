@@ -532,7 +532,13 @@ def verify(run_dir: Path, result_zip: Path) -> tuple[dict, int]:
         errors.append(f"artifact_contract_error: {exc}")
     fingerprint_values = list(errors)
     if verifier_result is not None:
-        fingerprint_values.append(json.dumps(verifier_result, ensure_ascii=False, sort_keys=True))
+        stable_verifier_result = {
+            "exit_code": verifier_result["exit_code"],
+            "stdout": verifier_result["stdout"],
+            "stderr": verifier_result["stderr"],
+            "timed_out": verifier_result["timed_out"],
+        }
+        fingerprint_values.append(json.dumps(stable_verifier_result, ensure_ascii=False, sort_keys=True))
     report = {
         "schema_version": 1,
         "operation_id": state["operation_id"],
