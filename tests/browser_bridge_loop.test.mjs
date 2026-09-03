@@ -26,6 +26,7 @@ import {
   selectSendButton,
   submitAction,
   uploadFile,
+  validateAttachments,
   validatePendingDownload,
 } from "../src/browser_bridge_loop.mjs";
 
@@ -253,25 +254,24 @@ test("결과 버튼은 기대 파일명이 포함된 링크나 버튼만 고른�
   assert.deepEqual(matches.map((item) => item.ref), [1, 2]);
 });
 
-test("가시 입력창과 숨겨진 파일 입력의 마지막·첫 요소를 고른다", () => {
+test("가시 입력창과 유일한 파일 입력을 고른다", () => {
   const selected = selectComposer({ elements: [
     { role: "textbox", inViewport: false, ref: 1 },
     { role: "textbox", inViewport: true, ref: 2 },
     { role: "textbox", inViewport: true, ref: 3 },
     { tag: "input", type: "file", inViewport: false, ref: 4 },
-    { tag: "input", type: "file", inViewport: true, ref: 5 },
   ] });
   assert.equal(selected.textbox.ref, 3);
   assert.equal(selected.fileInput.ref, 4);
 });
 
-test("파일 입력이 여러 개면 일반 첨부용 입력을 고른다", () => {
+test("파일 입력이 여러 개면 일반 첨부 선택자로 복구하도록 ref를 고르지 않는다", () => {
   const selected = selectComposer({ elements: [
     { role: "textbox", inViewport: true, ref: 3 },
-    { tag: "input", type: "file", id: "upload-photos", ref: 4 },
-    { tag: "input", type: "file", attributes: { id: "upload-files" }, ref: 5 },
+    { tag: "input", type: "file", ref: 4 },
+    { tag: "input", type: "file", ref: 5 },
   ] });
-  assert.equal(selected.fileInput.ref, 5);
+  assert.equal(selected.fileInput, null);
 });
 
 test("스냅샷에 파일 입력이 없으면 일반 파일용 CSS 선택자로 복구한다", async () => {
@@ -335,6 +335,38 @@ test("빈 파일은 브라우저 도구를 호출하기 전에 거부한다", as
   try {
     await assert.rejects(uploadFile(client, 17, null, filePath), /빈 파일/);
     assert.equal(called, false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("첨부 사전검사는 빈 파일과 폴더를 브리지 연결 전에 거부할 수 있다", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "browser-loop-preflight-"));
+  const emptyPath = path.join(directory, "empty.hwpx");
+  writeFileSync(emptyPath, "");
+  try {
+    assert.throws(() => validateAttachments([emptyPath]), /빈 파일/);
+    assert.throws(() => validateAttachments([directory]), /파일이어야/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("HWPX는 등록되지 않은 형식으로 가정하고 octet-stream으로 업로드한다", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "browser-loop-hwpx-upload-"));
+  const filePath = path.join(directory, "sample.hwpx");
+  writeFileSync(filePath, "sample");
+  const calls = [];
+  const client = {
+    async callTool(request) {
+      calls.push(request);
+      return mcpResult({ uploaded: "sample.hwpx" });
+    },
+  };
+  try {
+    await uploadFile(client, 17, null, filePath);
+    assert.equal(calls[0].arguments.selector, "#upload-files");
+    assert.equal(calls[0].arguments.mimeType, "application/octet-stream");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

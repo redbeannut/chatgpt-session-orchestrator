@@ -208,10 +208,10 @@ export function selectComposer(snapshot) {
     (element) => element.tag === "input" && element.type === "file",
   );
   if (!textboxes.length) throw new Error("ChatGPT 입력창을 찾지 못했습니다.");
-  const genericFileInput = fileInputs.find(
-    (element) => element.id === "upload-files" || element.attributes?.id === "upload-files",
-  );
-  return { textbox: textboxes.at(-1), fileInput: genericFileInput || fileInputs[0] || null };
+  return {
+    textbox: textboxes.at(-1),
+    fileInput: fileInputs.length === 1 ? fileInputs[0] : null,
+  };
 }
 
 export function selectSendButton(snapshot) {
@@ -447,10 +447,8 @@ async function waitForComposerReady(client, tabId, deadline, expectedFilename, m
 }
 
 export async function uploadFile(client, tabId, fileInputRef, filePath) {
+  validateAttachments([filePath]);
   const stats = statSync(filePath);
-  if (stats.size === 0) {
-    throw new Error(`빈 파일은 ChatGPT에 첨부할 수 없습니다: ${filePath}`);
-  }
   const target = Number.isInteger(fileInputRef)
     ? { ref: fileInputRef }
     : { selector: "#upload-files" };
@@ -466,6 +464,21 @@ export async function uploadFile(client, tabId, fileInputRef, filePath) {
   return callTool(client, "file_upload", { tabId, ...target, path: path.resolve(filePath) });
 }
 
+export function validateAttachments(attachments = []) {
+  for (const filePath of attachments) {
+    if (!existsSync(filePath)) {
+      throw new Error(`첨부 파일이 없습니다: ${filePath}`);
+    }
+    const stats = statSync(filePath);
+    if (!stats.isFile()) {
+      throw new Error(`첨부 경로는 파일이어야 합니다: ${filePath}`);
+    }
+    if (stats.size === 0) {
+      throw new Error(`빈 파일은 ChatGPT에 첨부할 수 없습니다: ${filePath}`);
+    }
+  }
+}
+
 function mimeTypeForFile(filePath) {
   return {
     ".zip": "application/zip",
@@ -476,7 +489,6 @@ function mimeTypeForFile(filePath) {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
-    ".hwpx": "application/vnd.hancom.hwpx",
   }[path.extname(filePath).toLocaleLowerCase()] || "application/octet-stream";
 }
 
@@ -745,16 +757,9 @@ function loadAutomationReport(runDir) {
 export async function runLoop(options) {
   const statePath = path.join(options.runDir, "state.json");
   if (!existsSync(statePath)) throw new Error(`state.json이 없습니다: ${statePath}`);
-  const client = await connectBridge(options.bridgeRoot);
+  let client = null;
   const report = resumeAutomationReport(loadAutomationReport(options.runDir), new Date().toISOString());
   try {
-    const diagnostic = await doctor(client);
-    report.bridge = {
-      serverVersion: diagnostic.status.serverVersion,
-      extensionVersion: diagnostic.status.extension?.version,
-      extensionConnected: diagnostic.health.extensionConnected,
-    };
-    console.log(`[정상] Browser Bridge ${report.bridge.serverVersion}, Chrome 확장 연결됨`);
     let preferredTabId = options.tabId;
     const pendingSubmissionPath = path.join(options.runDir, PENDING_SUBMISSION_FILE);
     const pendingDownloadPath = path.join(options.runDir, PENDING_DOWNLOAD_FILE);
@@ -768,6 +773,19 @@ export async function runLoop(options) {
         report.final_status = state.status;
         saveAutomationReport(options.runDir, report);
         return state;
+      }
+      if (["submit_initial", "submit_feedback"].includes(action.action)) {
+        validateAttachments(action.attachments);
+      }
+      if (!client) {
+        client = await connectBridge(options.bridgeRoot);
+        const diagnostic = await doctor(client);
+        report.bridge = {
+          serverVersion: diagnostic.status.serverVersion,
+          extensionVersion: diagnostic.status.extension?.version,
+          extensionConnected: diagnostic.health.extensionConnected,
+        };
+        console.log(`[정상] Browser Bridge ${report.bridge.serverVersion}, Chrome 확장 연결됨`);
       }
       const deadline = Date.now() + options.timeoutSeconds * 1000;
       if (["submit_initial", "submit_feedback"].includes(action.action)) {
@@ -888,7 +906,7 @@ export async function runLoop(options) {
     saveAutomationReport(options.runDir, report);
     throw error;
   } finally {
-    await client.close();
+    if (client) await client.close();
   }
 }
 
