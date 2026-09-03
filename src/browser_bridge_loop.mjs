@@ -208,7 +208,10 @@ export function selectComposer(snapshot) {
     (element) => element.tag === "input" && element.type === "file",
   );
   if (!textboxes.length) throw new Error("ChatGPT 입력창을 찾지 못했습니다.");
-  return { textbox: textboxes.at(-1), fileInput: fileInputs[0] || null };
+  const genericFileInput = fileInputs.find(
+    (element) => element.id === "upload-files" || element.attributes?.id === "upload-files",
+  );
+  return { textbox: textboxes.at(-1), fileInput: genericFileInput || fileInputs[0] || null };
 }
 
 export function selectSendButton(snapshot) {
@@ -445,19 +448,36 @@ async function waitForComposerReady(client, tabId, deadline, expectedFilename, m
 
 export async function uploadFile(client, tabId, fileInputRef, filePath) {
   const stats = statSync(filePath);
+  if (stats.size === 0) {
+    throw new Error(`빈 파일은 ChatGPT에 첨부할 수 없습니다: ${filePath}`);
+  }
   const target = Number.isInteger(fileInputRef)
     ? { ref: fileInputRef }
-    : { selector: 'input[type="file"]' };
+    : { selector: "#upload-files" };
   if (stats.size <= BASE64_UPLOAD_LIMIT) {
     return callTool(client, "file_upload", {
       tabId,
       ...target,
       base64: readFileSync(filePath).toString("base64"),
       filename: path.basename(filePath),
-      mimeType: "application/zip",
+      mimeType: mimeTypeForFile(filePath),
     });
   }
   return callTool(client, "file_upload", { tabId, ...target, path: path.resolve(filePath) });
+}
+
+function mimeTypeForFile(filePath) {
+  return {
+    ".zip": "application/zip",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".json": "application/json",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".hwpx": "application/vnd.hancom.hwpx",
+  }[path.extname(filePath).toLocaleLowerCase()] || "application/octet-stream";
 }
 
 async function waitForSendButton(client, tabId, deadline) {

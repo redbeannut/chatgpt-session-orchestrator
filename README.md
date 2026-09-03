@@ -1,8 +1,9 @@
 # ChatGPT Local Verification Loop
 
-Codex가 설치된 `chatgpt-delegate`로 ChatGPT 대화를 맡기고, 응답이나 생성 파일을
-로컬에서 검증한 뒤 실패 결과를 같은 대화로 돌려보내는 범용 실행 하네스다. 직접 만든
-Chrome 조작기는 Delegate를 사용할 수 없거나 기존 실행을 복구할 때만 fallback으로 유지한다.
+Codex가 작업마다 가장 짧은 검증된 전송 경로를 선택해 ChatGPT 대화를 맡기고, 응답이나
+생성 파일을 로컬에서 검증한 뒤 실패 결과를 같은 대화로 돌려보내는 범용 실행 하네스다.
+앱 내부 task 도구, 직접 Browser Bridge, 설치된 `chatgpt-delegate`를 한 단계 안에서
+중첩하지 않고 용도별로 선택한다.
 
 관련 노트는 [[../0. 하네스 엔지니어링 백과사전]]이다.
 구조와 확장 지점은 [[ARCHITECTURE]]에 정리했다.
@@ -10,21 +11,51 @@ Chrome 조작기는 Delegate를 사용할 수 없거나 기존 실행을 복구�
 ## 범위
 
 1. 작업 요청과 필요한 경우에만 `context.zip`을 준비한다.
-2. Codex가 Delegate로 새 ChatGPT 대화에 요청을 제출한다.
+2. Codex가 선택한 전송 경로로 ChatGPT 대화에 요청을 제출한다.
 3. 텍스트 응답은 바로 종합하고 파일 산출물은 로컬 검증한다.
 4. 검증 실패 시 `feedback.zip`을 같은 대화에 제출한다.
 5. 수정된 산출물이 로컬 검증을 통과할 때까지 계약 범위에서 반복한다.
 
-기본 전송은 설치된 `chatgpt-delegate`가 담당한다. 현재 Delegate가 필요에 따라
-Browser Bridge를 사용하더라도 이 저장소는 ChatGPT DOM·업로드·다운로드 로직을 새로
-확장하지 않는다. 상태와 ZIP 계약은 전송 방식에 종속되지 않는다.
+상태와 ZIP 계약은 전송 방식에 종속되지 않는다. 새 Chat 또는 Work의 복합 작업은
+`chatgpt-delegate`, 기존 대화의 읽기·텍스트 후속은 앱 내부 task 도구, 기존 웹 대화의
+파일 왕복은 이 저장소의 Browser Bridge 실행기가 담당한다.
 
 ## 권장 실행 경로
 
-새 작업은 `$gpt-web-orchestrator`로 시작한다. 스킬은 Delegate로 Chat 또는 Work를 열고
-최대 3개 대화를 조정한다. 대상 데스크톱 작업에 필요한 로컬 폴더가 열려 있고 접근이
-실제로 확인되면 파일 내용을 다시 포장하지 않는다. 브라우저 Chat이거나 로컬 접근이
-확인되지 않으면 context packer로 필요한 파일만 검토 후 첨부한다.
+새 작업은 `$gpt-web-orchestrator`로 시작한다. 스킬은 아래 순서로 가장 짧은 경로를
+선택하고 최대 3개 대화를 조정한다.
+
+| 작업 | 우선 경로 |
+| --- | --- |
+| 로컬 파일 수정·테스트 | Codex 로컬 프로젝트 |
+| 기존 대화 검색·읽기·텍스트 후속 | 앱 내부 task 도구 |
+| 기존 웹 대화의 파일 업로드·다운로드 | 정확한 대화 URL의 Browser Bridge |
+| 새 Chat/Work, 설정 확인, 장기 진행·조향·복합 산출물 | `chatgpt-delegate` |
+| 2~3개 worker 종합 | 오케스트레이터가 작업별 우선 경로 선택 |
+
+한 단계에서는 하나의 경로만 사용한다. 실패했다고 모든 경로를 차례로 탐색하지 않고,
+구조화된 blocker가 다음 경로의 capability와 맞을 때만 전환한다. 대상 로컬 폴더 접근이
+실제로 확인되면 파일을 다시 포장하지 않는다. 브라우저 Chat이거나 로컬 접근이 확인되지
+않으면 context packer로 필요한 파일만 검토 후 첨부한다. 파일은 존재 여부와 크기를 먼저
+검사하며 0바이트 파일은 브라우저를 열기 전에 거부한다.
+
+## 경로 선택 근거
+
+2026-09-03 앱 내부에서 기존 ChatGPT 대화 50개를 포함한 목록 조회는 2.63초, 지정 대화
+최근 2턴 읽기는 4.57초였다. 같은 대화에 빈 `fish.txt`를 브라우저로 첨부한 시험은
+ChatGPT가 첨부 카드를 만들지 않아 제출 전에 중단됐다. 이 결과를 반영해 텍스트 조회는
+앱 내부 경로를 유지하고, 직접 파일 경로는 0바이트 사전 차단과 일반 파일 입력 선택을
+추가했다. 시간 수치는 네트워크와 앱 상태에 따라 달라지므로 경로 선택의 보조 지표다.
+
+OpenAI의 [프로젝트 안내](https://learn.chatgpt.com/es-419/docs/projects)는 ChatGPT
+프로젝트 자료와 로컬 프로젝트 폴더를 구분하고, 특정 대화에만 필요한 파일은 그 대화에
+직접 첨부하도록 안내한다. [브라우저 확장 안내](https://learn.chatgpt.com/es-419/docs/chrome-extension)는
+Chrome 파일 업로드와 브라우저 제어를 별도 브라우저 capability로 설명한다. 공개 구현 중
+[Playwright MCP](https://github.com/microsoft/playwright-mcp)는 고처리량 작업에서 CLI와
+skill의 낮은 오버헤드를, 지속 상태·탐색 작업에서는 MCP의 장점을 구분한다.
+[ask-bridge](https://github.com/doggy8088/ask-bridge)와
+[OpenCLI](https://github.com/jackwener/OpenCLI/blob/main/docs/adapters/browser/chatgpt.md)도 기존
+브라우저 세션 재사용과 history·read·send·upload 동작 분리를 택한다.
 
 ## 실측 결과
 
@@ -125,10 +156,11 @@ Git diff 200KB 제한이며 `.env`, 개인 키, 알려진 API 키 형식과 지�
 본문에 넣지 않는다. Git diff에도 같은 include/exclude를 적용한다. 바이너리는
 `allow_binary_attachments`에 검토한 상대 경로를 정확히 적은 파일만 첨부한다.
 
-## 레거시 Browser Bridge 실행
+## Browser Bridge 파일 왕복
 
-Delegate를 사용할 수 없거나 기존 이벤트 로그 작업을 복구할 때만 실행한다. Chrome에서
-Browser Bridge가 연결된 상태라면 프로젝트 루트에서 다음 명령을 사용한다.
+기존 웹 대화에서 파일을 올리거나 결과를 내려받을 때, 또는 기존 이벤트 로그 작업을
+복구할 때 사용한다. Chrome에서 Browser Bridge가 연결된 상태라면 프로젝트 루트에서
+다음 명령을 사용한다.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/run_browser_loop.ps1 `
@@ -155,7 +187,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_browser_loop.ps1 `
 `specs/command-loop-canary.json`을 복사해 프롬프트, 컨텍스트 파일, 결과 계약,
 로컬 검증 명령만 교체한다.
 
-## 레거시 최대 3개 작업자 오케스트레이션
+## 최대 3개 Browser Bridge 작업자 오케스트레이션
 
 `src/orchestrator.mjs`는 기존 단일 브라우저 루프를 변경하지 않고 최대 3개의
 ChatGPT 작업자를 capability와 프로젝트 경계에 맞춰 임대한다. 하나의 coordinator

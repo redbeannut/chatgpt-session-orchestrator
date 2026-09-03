@@ -265,7 +265,16 @@ test("가시 입력창과 숨겨진 파일 입력의 마지막·첫 요소를 �
   assert.equal(selected.fileInput.ref, 4);
 });
 
-test("스냅샷에 파일 입력이 없으면 업로드 시 CSS 선택자로 복구한다", async () => {
+test("파일 입력이 여러 개면 일반 첨부용 입력을 고른다", () => {
+  const selected = selectComposer({ elements: [
+    { role: "textbox", inViewport: true, ref: 3 },
+    { tag: "input", type: "file", id: "upload-photos", ref: 4 },
+    { tag: "input", type: "file", attributes: { id: "upload-files" }, ref: 5 },
+  ] });
+  assert.equal(selected.fileInput.ref, 5);
+});
+
+test("스냅샷에 파일 입력이 없으면 일반 파일용 CSS 선택자로 복구한다", async () => {
   const selected = selectComposer({ elements: [
     { role: "textbox", inViewport: true, ref: 3 },
   ] });
@@ -284,8 +293,48 @@ test("스냅샷에 파일 입력이 없으면 업로드 시 CSS 선택자로 복
   try {
     await uploadFile(client, 17, selected.fileInput?.ref, filePath);
     assert.equal(calls[0].name, "file_upload");
-    assert.equal(calls[0].arguments.selector, 'input[type="file"]');
+    assert.equal(calls[0].arguments.selector, "#upload-files");
+    assert.equal(calls[0].arguments.mimeType, "application/zip");
     assert.equal("ref" in calls[0].arguments, false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("작은 텍스트 파일은 text/plain으로 업로드한다", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "browser-loop-text-upload-"));
+  const filePath = path.join(directory, "fish.txt");
+  writeFileSync(filePath, "sample");
+  const calls = [];
+  const client = {
+    async callTool(request) {
+      calls.push(request);
+      return mcpResult({ uploaded: "fish.txt" });
+    },
+  };
+  try {
+    await uploadFile(client, 17, 9, filePath);
+    assert.equal(calls[0].arguments.ref, 9);
+    assert.equal(calls[0].arguments.mimeType, "text/plain");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("빈 파일은 브라우저 도구를 호출하기 전에 거부한다", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "browser-loop-empty-upload-"));
+  const filePath = path.join(directory, "empty.txt");
+  writeFileSync(filePath, "");
+  let called = false;
+  const client = {
+    async callTool() {
+      called = true;
+      return mcpResult({});
+    },
+  };
+  try {
+    await assert.rejects(uploadFile(client, 17, null, filePath), /빈 파일/);
+    assert.equal(called, false);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
