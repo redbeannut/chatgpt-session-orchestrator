@@ -589,7 +589,7 @@ def default_fixture() -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="ChatGPT Chrome 검증 루프 PoC")
+    parser = argparse.ArgumentParser(description="ChatGPT Chrome 범용 검증 루프")
     subparsers = parser.add_subparsers(dest="command", required=True)
     prepare_parser = subparsers.add_parser("prepare")
     prepare_parser.add_argument("--run-dir", type=Path, required=True)

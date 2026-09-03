@@ -39,6 +39,12 @@ context.zip + prompt.md + operation_id
 `browser-bridge`는 실제 Chrome 입출력을 담당하고, `codex-chatgpt-control`은
 ChatGPT 화면 상태와 제출·대기·다운로드 규칙을 담당한다.
 
+현재 개인용 실행 경로는 `scripts/run_browser_loop.ps1`에서 서버를 확인한 뒤
+`src/browser_bridge_loop.mjs`를 호출한다. 실행기는 Browser Bridge의 공개 MCP 도구만
+사용하며 ChatGPT의 비공개 API를 호출하지 않는다. 새 대화는 정식 `/c/<id>` URL이
+확정된 뒤에만 기록하고, 닫힌 대화 탭은 기록된 URL로 다시 열어 재개한다. 실행 보고서는
+프롬프트 본문이나 토큰 없이 제출 키·첨부 파일명·검증 해시만 저장한다.
+
 ### 검증 어댑터
 
 두 종류를 지원한다.

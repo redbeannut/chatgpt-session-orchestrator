@@ -1,4 +1,4 @@
-# ChatGPT Browser Loop PoC
+# ChatGPT Browser Loop
 
 Codex가 로그인된 Chrome의 ChatGPT 대화를 조작하고, 생성된 ZIP을 로컬에서
 검증한 뒤 실패 결과를 같은 대화로 돌려보내는 범용 실행 하네스다.
@@ -47,6 +47,13 @@ Codex가 로그인된 Chrome의 ChatGPT 대화를 조작하고, 생성된 ZIP을
 따라서 파일 내용을 본문에 대신 넣지 않고도 실제 업로드·다운로드·로컬 검증·동일
 대화 수정 요청이 모두 동작한다. 특정 문서 형식은 이후 작업별 검증기 중 하나다.
 
+2026-09-03에는 `run_browser_loop.ps1` 한 명령으로 `auto-command-live-003`을 실행했다.
+명령형 로컬 검증기를 사용해 첫 결과 실패, 자동 피드백 업로드, 두 번째 결과 통과를
+사람의 브라우저 조작 없이 완료했다. 첫 결과 SHA-256은
+`32398647a5bff667e049b5af260ed934f9892e08a4dfd9ac02dc96cbf22887a0`, 수정 결과는
+`c55d8dff91934441e8fb87fc41e588d80581cdba4af7921d1e3a2c10a42eec95`이며 최종 상태는
+`verified`다.
+
 ## 범용 작업 계약
 
 `specs/command-canary.json`처럼 작업마다 다음 항목을 선언한다.
@@ -59,7 +66,32 @@ Codex가 로그인된 Chrome의 ChatGPT 대화를 조작하고, 생성된 ZIP을
 명령형 검증기는 로컬 명세에 지정된 argv만 `shell=False`로 실행한다. 다운로드한
 결과물에 포함된 스크립트는 자동 실행하지 않는다.
 
-## 실행
+## 개인용 한 명령 실행
+
+Chrome에서 Browser Bridge가 연결된 상태라면 프로젝트 루트에서 다음 명령만 실행한다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_browser_loop.ps1 `
+  -RunDir runs/my-task-001 `
+  -Spec specs/command-loop-canary.json
+```
+
+실행기는 다음 작업을 자동으로 처리한다.
+
+- 서버와 Chrome 확장 연결 상태를 검사한다.
+- 실행 폴더가 없으면 작업 명세로 `context.zip`을 준비한다.
+- 새 ChatGPT 탭을 열고 프롬프트와 컨텍스트를 첨부한다.
+- 지정한 이름의 결과만 다운로드해 안전하게 압축 해제한다.
+- 로컬 검증 실패 시 `feedback.zip`을 같은 대화에 제출한다.
+- 통과·동일 실패 반복·최대 시도 도달까지 상태 머신을 진행한다.
+- 중간에 종료되면 같은 명령을 다시 실행해 기록된 대화를 다시 열고 이어간다.
+
+실행 결과는 `runs/my-task-001/state.json`과
+`browser-automation-report.json`에서 확인한다. 새 업무는
+`specs/command-loop-canary.json`을 복사해 프롬프트, 컨텍스트 파일, 결과 계약,
+로컬 검증 명령만 교체한다.
+
+## 상태 머신 수동 실행
 
 ```powershell
 python src/harness.py prepare --run-dir runs/poc-001
