@@ -6,6 +6,8 @@
 ```text
 작업 명세 JSON
   ↓
+context config → dry-run preview → briefing.md + context_files
+  ↓
 context.zip + prompt.md + operation_id
   ↓
 브라우저 전송 어댑터

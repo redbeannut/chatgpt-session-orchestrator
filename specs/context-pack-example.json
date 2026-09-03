@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "root": "..",
+  "objective": "현재 ChatGPT 브라우저 루프의 설계 허점을 검토한다.",
+  "question": "로컬 근거를 바탕으로 가장 큰 설계 위험과 최소 수정안을 제안하라.",
+  "required_output": "근거, 우선순위, 최소 수정안, 검증 방법을 포함한 Markdown 보고서.",
+  "confirmed_facts": [
+    "Codex가 로컬 실행과 검증을 담당한다.",
+    "ChatGPT Web은 전달된 프롬프트와 첨부만 볼 수 있다."
+  ],
+  "assumptions": [],
+  "constraints": [
+    "라이브 ChatGPT 작업자는 최대 3개다.",
+    "브리지 토큰과 개인 Vault 정보는 전송하지 않는다."
+  ],
+  "decisions": [
+    "ChatGPT Web은 기획 검토를, Codex는 로컬 실행을 담당한다."
+  ],
+  "rejected_approaches": [],
+  "unresolved_questions": [],
+  "include": [
+    "README.md",
+    "ARCHITECTURE.md",
+    "src/context_packer.py",
+    "src/orchestrator.mjs"
+  ],
+  "exclude": ["tests/**"],
+  "allow_binary_attachments": [],
+  "include_git_diff": true
+}

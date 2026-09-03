@@ -95,6 +95,26 @@ Codex가 로그인된 Chrome의 ChatGPT 대화를 조작하고, 생성된 ZIP을
 명령형 검증기는 로컬 명세에 지정된 argv만 `shell=False`로 실행한다. 다운로드한
 결과물에 포함된 스크립트는 자동 실행하지 않는다.
 
+## 전송 전 context packer
+
+`src/context_packer.py`는 Web이 Codex 메모리와 로컬 경로를 모른다는 전제로 선택한
+텍스트 파일을 안정적인 줄 번호와 함께 `briefing.md`에 넣고, 이미지·문서 같은 허용
+바이너리는 별도 첨부 목록으로 만든다. 선택 파일 지도, Git diff, 예상 토큰, 실제 포함
+용량, 비밀·대용량·미지원 파일의 차단 사유를 `.context.json`에 기록한다.
+
+먼저 아무 파일도 쓰지 않는 미리보기를 확인한다.
+
+```powershell
+python src/context_packer.py --config specs/context-pack-example.json `
+  --output runs/context-preview/briefing.md --dry-run
+```
+
+확인 후 `--dry-run`만 빼면 `briefing.md`와 `briefing.context.json`이 생성된다. 보고서의
+`context_files` 배열을 worker spec에 그대로 사용한다. 기본 파일당 500KB, 전체 2MB,
+Git diff 200KB 제한이며 `.env`, 개인 키, 알려진 API 키 형식과 지원하지 않는 바이너리는
+본문에 넣지 않는다. Git diff에도 같은 include/exclude를 적용한다. 바이너리는
+`allow_binary_attachments`에 검토한 상대 경로를 정확히 적은 파일만 첨부한다.
+
 ## 개인용 한 명령 실행
 
 Chrome에서 Browser Bridge가 연결된 상태라면 프로젝트 루트에서 다음 명령만 실행한다.
