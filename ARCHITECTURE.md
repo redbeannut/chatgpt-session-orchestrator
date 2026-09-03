@@ -6,19 +6,21 @@
 ```text
 작업 명세 JSON
   ↓
-context config → dry-run preview → briefing.md + context_files
+로컬 폴더 접근 확인
+  ├─ 확인됨 → 직접 파일 사용
+  └─ 미확인 → context packer → briefing.md + context_files
   ↓
-context.zip + prompt.md + operation_id
+설치된 chatgpt-delegate
   ↓
-브라우저 전송 어댑터
+Chat 또는 Work 대화
   ↓
-동일한 ChatGPT 대화에서 result.zip 생성
-  ↓
-안전한 압축 해제
-  ↓
-로컬 검증 어댑터
-  ├─ 통과 → verified
-  └─ 실패 → feedback.zip → 같은 대화 재제출
+응답 또는 result.zip
+  ├─ 텍스트 → 로컬 종합
+  └─ result.zip → 안전한 압축 해제 → 로컬 검증
+       ├─ 통과 → verified
+       └─ 실패 → feedback.zip → 같은 대화 재제출
+
+legacy fallback → browser_bridge_loop.mjs
 ```
 
 ## 계층
@@ -31,17 +33,24 @@ context.zip + prompt.md + operation_id
 
 ### 전송 어댑터
 
-하네스의 `next-action` 출력만 소비한다. 브라우저 구현은 다음 동작을 책임진다.
+기본 전송은 설치된 `chatgpt-delegate`다. 새 대화 생성, 파일 첨부, 응답 대기, 정확한
+파일명 다운로드는 Delegate에 맡긴다. 이 저장소는 작업 계약과 로컬 검증만 소유한다.
+
+데스크톱 Chat 또는 Work가 필요한 폴더를 열고 접근 권한을 확인한 경우 그 파일을 직접
+사용한다. 브라우저 Chat 또는 접근이 불명확한 작업은 context packer로 최소 자료를
+첨부한다. 사이드바 공유나 대화 고정은 로컬 접근 증거가 아니다.
+
+레거시 브라우저 구현은 하네스의 `next-action` 출력만 소비하며 다음 동작을 책임진다.
 
 - `submit_initial`에서 새 대화에 프롬프트와 컨텍스트를 한 번만 제출한다.
 - `await_download`에서 정확한 결과 파일명만 내려받는다.
 - `submit_feedback`에서 같은 대화에 실패 자료를 한 번만 제출한다.
 - 각 제출 뒤 `record-submission`으로 제출 키와 대화 URL을 고정한다.
 
-`browser-bridge`는 실제 Chrome 입출력을 담당하고, `codex-chatgpt-control`은
-ChatGPT 화면 상태와 제출·대기·다운로드 규칙을 담당한다.
+`browser-bridge`는 Delegate 또는 레거시 경로가 Chrome을 제어할 때 사용하는 기반이다.
+`codex-chatgpt-control`은 ChatGPT 화면 상태와 제출·대기·다운로드 규칙을 담당한다.
 
-현재 개인용 실행 경로는 `scripts/run_browser_loop.ps1`에서 서버를 확인한 뒤
+레거시 실행 경로는 `scripts/run_browser_loop.ps1`에서 서버를 확인한 뒤
 `src/browser_bridge_loop.mjs`를 호출한다. 실행기는 Browser Bridge의 공개 MCP 도구만
 사용하며 ChatGPT의 비공개 API를 호출하지 않는다. 새 대화는 정식 `/c/<id>` URL이
 확정된 뒤에만 기록하고, 닫힌 대화 탭은 기록된 URL로 다시 열어 재개한다. 실행 보고서는
