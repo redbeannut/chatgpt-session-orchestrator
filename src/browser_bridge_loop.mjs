@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -18,6 +19,8 @@ const PROJECT_ROOT = path.resolve(path.dirname(MODULE_PATH), "..");
 const DEFAULT_BRIDGE_ROOT = path.join(homedir(), "tools", "browser-bridge");
 const DEFAULT_DOWNLOAD_DIR = path.join(homedir(), "Downloads");
 const BASE64_UPLOAD_LIMIT = 4 * 1024 * 1024;
+const PENDING_SUBMISSION_FILE = "pending-submission.json";
+const PENDING_DOWNLOAD_FILE = "pending-download.json";
 
 export function parseArgs(argv) {
   const options = {
@@ -62,7 +65,10 @@ export function parseArgs(argv) {
 export function expectedDownloadRegex(filename) {
   const parsed = path.parse(filename);
   const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${escape(parsed.name)}(?:\\s*\\(\\d+\\))?${escape(parsed.ext)}$`, "i");
+  return new RegExp(
+    `^${escape(parsed.name)}(?:\\s*\\((?:\\d+|\\d{8}-\\d{6})\\))?${escape(parsed.ext)}$`,
+    "i",
+  );
 }
 
 export function isExpectedDownload(filename, expected) {
@@ -73,8 +79,11 @@ export function normalizeConversationUrl(rawUrl) {
   if (!rawUrl) return null;
   try {
     const url = new URL(rawUrl);
+    if (url.origin !== "https://chatgpt.com") return null;
+    const decodedPath = decodeURIComponent(url.pathname).replace(/\/$/, "");
     url.search = "";
     url.hash = "";
+    url.pathname = decodedPath;
     return url.href.replace(/\/$/, "");
   } catch {
     return null;
@@ -83,11 +92,46 @@ export function normalizeConversationUrl(rawUrl) {
 
 export function isCanonicalConversationUrl(rawUrl) {
   const normalized = normalizeConversationUrl(rawUrl);
-  return Boolean(
-    normalized
-    && normalized.startsWith("https://chatgpt.com/c/")
-    && !normalized.includes("/c/WEB:"),
-  );
+  if (!normalized) return false;
+  const url = new URL(normalized);
+  const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+  return new RegExp(`^/c/${uuid}$`, "i").test(url.pathname)
+    || new RegExp(`^/g/[^/]+/c/${uuid}$`, "i").test(url.pathname);
+}
+
+export function isChatGptSurfaceUrl(rawUrl) {
+  try {
+    return new URL(rawUrl).origin === "https://chatgpt.com";
+  } catch {
+    return false;
+  }
+}
+
+export function isChatGptDownloadUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    return url.origin === "https://chatgpt.com"
+      && url.pathname.startsWith("/backend-api/estuary/content");
+  } catch {
+    return false;
+  }
+}
+
+export function selectPreferredTab(tabs, preferredTabId, conversationUrl) {
+  if (preferredTabId === null) return null;
+  const preferred = tabs.find((tab) => tab.id === preferredTabId);
+  if (!preferred && !conversationUrl) {
+    throw new Error(`지정한 Chrome 탭을 찾지 못했습니다: ${preferredTabId}`);
+  }
+  if (preferred && !isChatGptSurfaceUrl(preferred.url) && !conversationUrl) {
+    throw new Error(`지정한 탭은 ChatGPT 탭이 아닙니다: ${preferred.url}`);
+  }
+  const normalizedConversation = normalizeConversationUrl(conversationUrl);
+  if (preferred && (!conversationUrl
+      || normalizeConversationUrl(preferred.url) === normalizedConversation)) {
+    return preferred;
+  }
+  return null;
 }
 
 export function resultElements(snapshot, expectedFilename) {
@@ -104,11 +148,10 @@ export function selectComposer(snapshot) {
     (element) => element.role === "textbox" && element.inViewport !== false,
   );
   const fileInputs = elements.filter(
-    (element) => element.tag === "input" && element.type === "file" && element.inViewport !== false,
+    (element) => element.tag === "input" && element.type === "file",
   );
   if (!textboxes.length) throw new Error("ChatGPT 입력창을 찾지 못했습니다.");
-  if (!fileInputs.length) throw new Error("ChatGPT 파일 입력을 찾지 못했습니다.");
-  return { textbox: textboxes.at(-1), fileInput: fileInputs[0] };
+  return { textbox: textboxes.at(-1), fileInput: fileInputs[0] || null };
 }
 
 export function selectSendButton(snapshot) {
@@ -149,6 +192,19 @@ export function resumeAutomationReport(existing, startedAt) {
 
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function readJsonIfExists(filePath) {
+  if (!existsSync(filePath)) return null;
+  return JSON.parse(readFileSync(filePath, "utf8"));
+}
+
+function writeJson(filePath, value) {
+  writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function removeIfExists(filePath) {
+  if (existsSync(filePath)) unlinkSync(filePath);
 }
 
 function parseTextResult(result, toolName) {
@@ -202,7 +258,7 @@ async function connectBridge(bridgeRoot) {
   const tokenPath = path.join(homedir(), ".browser-bridge", "token");
   const token = readFileSync(tokenPath, "utf8").trim();
   const client = new clientModule.Client(
-    { name: "chatgpt-browser-loop", version: "0.3.0" },
+    { name: "chatgpt-browser-loop", version: "0.3.1" },
     { capabilities: {} },
   );
   const transport = new transportModule.StreamableHTTPClientTransport(
@@ -239,12 +295,8 @@ async function currentTab(client, tabId) {
 async function findConversationTab(client, conversationUrl, preferredTabId) {
   const tabs = await callTool(client, "tabs_list", { short: false });
   const normalizedConversation = normalizeConversationUrl(conversationUrl);
-  if (preferredTabId !== null) {
-    const preferred = tabs.find((tab) => tab.id === preferredTabId);
-    if (preferred && (!conversationUrl || normalizeConversationUrl(preferred.url) === normalizedConversation)) {
-      return preferred;
-    }
-  }
+  const preferred = selectPreferredTab(tabs, preferredTabId, conversationUrl);
+  if (preferred) return preferred;
   if (conversationUrl) {
     const exact = tabs.find((tab) => normalizeConversationUrl(tab.url) === normalizedConversation);
     if (exact) return exact;
@@ -261,33 +313,44 @@ async function findConversationTab(client, conversationUrl, preferredTabId) {
   return { id: createdId, url: "https://chatgpt.com/" };
 }
 
-async function waitForComposerReady(client, tabId, deadline) {
+async function waitForComposerReady(client, tabId, deadline, expectedFilename, minimumResults = 0) {
   let lastError = null;
+  let lastResultCount = null;
+  let stableSamples = 0;
   while (Date.now() < deadline) {
     try {
       const pageSnapshot = await snapshot(client, tabId);
       const composer = selectComposer(pageSnapshot);
-      return { pageSnapshot, composer };
+      const resultCount = resultElements(pageSnapshot, expectedFilename).length;
+      if (resultCount < minimumResults) {
+        throw new Error(`이전 결과물 로딩 대기 중 (${resultCount}/${minimumResults})`);
+      }
+      stableSamples = resultCount === lastResultCount ? stableSamples + 1 : 0;
+      lastResultCount = resultCount;
+      if (stableSamples >= 2) return { pageSnapshot, composer };
     } catch (error) {
       lastError = error;
-      await sleep(1000);
     }
+    await sleep(750);
   }
   throw lastError || new Error("ChatGPT 입력창 준비 시간이 초과됐습니다.");
 }
 
-async function uploadFile(client, tabId, fileInputRef, filePath) {
+export async function uploadFile(client, tabId, fileInputRef, filePath) {
   const stats = statSync(filePath);
+  const target = Number.isInteger(fileInputRef)
+    ? { ref: fileInputRef }
+    : { selector: 'input[type="file"]' };
   if (stats.size <= BASE64_UPLOAD_LIMIT) {
     return callTool(client, "file_upload", {
       tabId,
-      ref: fileInputRef,
+      ...target,
       base64: readFileSync(filePath).toString("base64"),
       filename: path.basename(filePath),
       mimeType: "application/zip",
     });
   }
-  return callTool(client, "file_upload", { tabId, ref: fileInputRef, path: path.resolve(filePath) });
+  return callTool(client, "file_upload", { tabId, ...target, path: path.resolve(filePath) });
 }
 
 async function waitForSendButton(client, tabId, deadline) {
@@ -311,21 +374,120 @@ async function waitForConversationUrl(client, tabId, deadline) {
   throw new Error("새 ChatGPT 대화 URL을 확인하지 못했습니다.");
 }
 
-async function submitAction(client, tab, action, deadline) {
-  const { pageSnapshot, composer } = await waitForComposerReady(client, tab.id, deadline);
+async function submitAction(client, tab, action, deadline, runDir, minimumResults) {
+  const { pageSnapshot, composer } = await waitForComposerReady(
+    client,
+    tab.id,
+    deadline,
+    action.expected_download,
+    minimumResults,
+  );
   const baselineResults = resultElements(pageSnapshot, action.expected_download).length;
-  const prompt = action.prompt_file
+  const originalPrompt = action.prompt_file
     ? readFileSync(action.prompt_file, "utf8")
     : action.prompt;
+  const marker = `submission_key: ${action.submission_key}`;
+  const prompt = `${marker}\n\n${originalPrompt}`;
+  const pendingPath = path.join(runDir, PENDING_SUBMISSION_FILE);
+  const pending = {
+    schema_version: 1,
+    submission_key: action.submission_key,
+    action: action.action,
+    tab_id: tab.id,
+    marker,
+    baseline_results: baselineResults,
+    expected_download: action.expected_download,
+    attachments: (action.attachments || []).map((item) => path.basename(item)),
+    stage: "composing",
+    created_at: new Date().toISOString(),
+  };
+  writeJson(pendingPath, pending);
   await callTool(client, "fill", { tabId: tab.id, ref: composer.textbox.ref, value: prompt });
   for (const attachment of action.attachments || []) {
-    await uploadFile(client, tab.id, composer.fileInput.ref, attachment);
+    await uploadFile(client, tab.id, composer.fileInput?.ref, attachment);
   }
   const send = await waitForSendButton(client, tab.id, deadline);
+  pending.stage = "ready";
+  writeJson(pendingPath, pending);
   await callTool(client, "click", { tabId: tab.id, ref: send.ref, timeoutMs: 10_000 });
+  pending.stage = "clicked";
+  writeJson(pendingPath, pending);
+  if (process.env.BROWSER_LOOP_TEST_FAILPOINT === "after-click") {
+    throw new Error("테스트 실패 지점: ChatGPT 전송 직후");
+  }
   const conversationUrl = action.conversation_url
     || await waitForConversationUrl(client, tab.id, deadline);
-  return { conversationUrl, baselineResults };
+  return { conversationUrl, baselineResults, recovered: false };
+}
+
+async function recoverPendingSubmission(client, action, pending, deadline, runDir) {
+  if (pending.submission_key !== action.submission_key) {
+    throw new Error("현재 제출 키와 보류된 브라우저 제출 키가 다릅니다.");
+  }
+  const tab = await currentTab(client, Number(pending.tab_id));
+  if (!tab || !isChatGptSurfaceUrl(tab.url)) {
+    throw new Error("보류된 제출의 ChatGPT 탭을 찾지 못해 중복 제출을 차단했습니다.");
+  }
+  const recoveryDeadline = Math.min(deadline, Date.now() + 15_000);
+  while (Date.now() < recoveryDeadline) {
+    let pageSnapshot = await snapshot(client, tab.id);
+    const draft = (pageSnapshot.elements || []).find(
+      (element) => element.role === "textbox"
+        && element.inViewport !== false
+        && String(element.label || "").includes(pending.marker),
+    );
+    if (draft) {
+      for (const attachment of action.attachments || []) {
+        const filename = path.basename(attachment);
+        const attached = (pageSnapshot.elements || []).some(
+          (element) => String(element.label || "").includes(filename),
+        );
+        if (!attached) {
+          const composer = selectComposer(pageSnapshot);
+          await uploadFile(client, tab.id, composer.fileInput?.ref, attachment);
+          pageSnapshot = await snapshot(client, tab.id);
+        }
+      }
+      const send = await waitForSendButton(client, tab.id, deadline);
+      await callTool(client, "click", { tabId: tab.id, ref: send.ref, timeoutMs: 10_000 });
+      pending.stage = "clicked_after_recovery";
+      writeJson(path.join(runDir, PENDING_SUBMISSION_FILE), pending);
+      const conversationUrl = action.conversation_url
+        || await waitForConversationUrl(client, tab.id, deadline);
+      return { conversationUrl, baselineResults: pending.baseline_results, recovered: true, tab };
+    }
+    const page = await callTool(client, "get_page_text", { tabId: tab.id });
+    const refreshedTab = await currentTab(client, tab.id);
+    const pageUrl = isCanonicalConversationUrl(page?.url)
+      ? normalizeConversationUrl(page.url)
+      : (isCanonicalConversationUrl(refreshedTab?.url) ? normalizeConversationUrl(refreshedTab.url) : null);
+    if (pageUrl && String(page?.text || "").includes(pending.marker)) {
+      return { conversationUrl: pageUrl, baselineResults: pending.baseline_results, recovered: true, tab };
+    }
+    await sleep(750);
+  }
+  throw new Error("제출 결과가 불확실해 중복 제출을 차단했습니다. ChatGPT 대화를 직접 확인하세요.");
+}
+
+export function validatePendingDownload(pending, action, state) {
+  if (!pending) {
+    throw new Error("다운로드 기준 기록이 없어 이전 결과물 선택을 차단했습니다.");
+  }
+  const latestSubmission = (state.submissions || []).at(-1);
+  if (!latestSubmission || pending.submission_key !== latestSubmission.submission_key) {
+    throw new Error("다운로드 기준의 제출 키가 현재 상태와 다릅니다.");
+  }
+  if (pending.expected_download !== action.expected_download) {
+    throw new Error("다운로드 기준의 파일명이 현재 작업과 다릅니다.");
+  }
+  if (normalizeConversationUrl(pending.conversation_url)
+      !== normalizeConversationUrl(state.conversation_url)) {
+    throw new Error("다운로드 기준의 대화 URL이 현재 상태와 다릅니다.");
+  }
+  if (!Number.isInteger(pending.baseline_results) || pending.baseline_results < 0) {
+    throw new Error("다운로드 기준 결과 개수가 올바르지 않습니다.");
+  }
+  return pending.baseline_results;
 }
 
 async function waitForResult(client, tabId, expectedFilename, baselineResults, deadline) {
@@ -354,7 +516,16 @@ function listDownloadCandidates(downloadDir, expectedFilename) {
     });
 }
 
-async function clickAndCaptureDownload(client, tabId, resultElement, expectedFilename, downloadDir, deadline) {
+export async function clickAndCaptureDownload(
+  client,
+  tabId,
+  resultElement,
+  expectedFilename,
+  downloadDir,
+  deadline,
+) {
+  const sourceTab = await currentTab(client, tabId);
+  const sourceUrl = normalizeConversationUrl(sourceTab?.url);
   const before = new Map(
     listDownloadCandidates(downloadDir, expectedFilename)
       .map((item) => [item.path, `${item.size}:${item.mtimeMs}`]),
@@ -362,13 +533,52 @@ async function clickAndCaptureDownload(client, tabId, resultElement, expectedFil
   const cutoff = Date.now() - 1500;
   await callTool(client, "click", { tabId, ref: resultElement.ref, timeoutMs: 10_000 });
   let previous = null;
+  let redirectedUrl = null;
   while (Date.now() < deadline) {
     const fresh = listDownloadCandidates(downloadDir, expectedFilename)
       .filter((item) => item.mtimeMs >= cutoff && before.get(item.path) !== `${item.size}:${item.mtimeMs}`)
       .sort((left, right) => right.mtimeMs - left.mtimeMs)[0];
     if (fresh && fresh.size > 0) {
-      if (previous?.path === fresh.path && previous.size === fresh.size) return fresh.path;
+      if (previous?.path === fresh.path && previous.size === fresh.size) {
+        return {
+          path: fresh.path,
+          transient: false,
+          method: "browser-download",
+          conversationRestored: true,
+        };
+      }
       previous = fresh;
+    }
+    const tab = await currentTab(client, tabId);
+    if (isChatGptDownloadUrl(tab?.url) && tab.url !== redirectedUrl) {
+      redirectedUrl = tab.url;
+      const transientPath = path.join(
+        downloadDir,
+        `.browser-loop-${process.pid}-${Date.now()}-${path.basename(expectedFilename)}`,
+      );
+      await callTool(client, "download_resource", {
+        url: redirectedUrl,
+        savePath: transientPath,
+        timeoutMs: Math.max(30_000, deadline - Date.now()),
+      });
+      if (!existsSync(transientPath) || statSync(transientPath).size === 0) {
+        throw new Error(`${expectedFilename} 직접 다운로드 결과가 비어 있습니다.`);
+      }
+      let conversationRestored = false;
+      if (sourceUrl) {
+        await callTool(client, "navigate", { tabId, url: sourceUrl });
+        const restoredTab = await currentTab(client, tabId);
+        conversationRestored = normalizeConversationUrl(restoredTab?.url) === sourceUrl;
+        if (!conversationRestored) {
+          throw new Error("직접 다운로드 후 원래 ChatGPT 대화로 복귀하지 못했습니다.");
+        }
+      }
+      return {
+        path: transientPath,
+        transient: true,
+        method: "bridge-download-resource",
+        conversationRestored,
+      };
     }
     await sleep(500);
   }
@@ -403,21 +613,55 @@ export async function runLoop(options) {
     };
     console.log(`[정상] Browser Bridge ${report.bridge.serverVersion}, Chrome 확장 연결됨`);
     let preferredTabId = options.tabId;
-    let pendingBaselineResults = null;
+    const pendingSubmissionPath = path.join(options.runDir, PENDING_SUBMISSION_FILE);
+    const pendingDownloadPath = path.join(options.runDir, PENDING_DOWNLOAD_FILE);
     while (true) {
       const state = readState(options.runDir);
       const action = runHarness(["next-action", "--run-dir", options.runDir]);
       if (action.action === "none") {
+        removeIfExists(pendingSubmissionPath);
+        removeIfExists(pendingDownloadPath);
         report.finished_at = new Date().toISOString();
         report.final_status = state.status;
         saveAutomationReport(options.runDir, report);
         return state;
       }
       const deadline = Date.now() + options.timeoutSeconds * 1000;
-      const tab = await findConversationTab(client, state.conversation_url, preferredTabId);
-      preferredTabId = tab.id;
       if (["submit_initial", "submit_feedback"].includes(action.action)) {
-        const submitted = await submitAction(client, tab, action, deadline);
+        removeIfExists(pendingDownloadPath);
+        const pendingSubmission = readJsonIfExists(pendingSubmissionPath);
+        let tab;
+        let submitted;
+        if (pendingSubmission) {
+          submitted = await recoverPendingSubmission(
+            client,
+            action,
+            pendingSubmission,
+            deadline,
+            options.runDir,
+          );
+          tab = submitted.tab;
+        } else {
+          tab = await findConversationTab(client, state.conversation_url, preferredTabId);
+          submitted = await submitAction(
+            client,
+            tab,
+            action,
+            deadline,
+            options.runDir,
+            state.attempts.length,
+          );
+        }
+        preferredTabId = tab.id;
+        writeJson(pendingDownloadPath, {
+          schema_version: 1,
+          submission_key: action.submission_key,
+          tab_id: tab.id,
+          conversation_url: submitted.conversationUrl,
+          expected_download: action.expected_download,
+          baseline_results: submitted.baselineResults,
+          created_at: new Date().toISOString(),
+        });
         runHarness([
           "record-submission",
           "--run-dir", options.runDir,
@@ -430,13 +674,22 @@ export async function runLoop(options) {
           conversation_url: submitted.conversationUrl,
           attachments: (action.attachments || []).map((item) => path.basename(item)),
           baseline_results: submitted.baselineResults,
+          recovered: submitted.recovered,
         });
-        pendingBaselineResults = submitted.baselineResults;
+        removeIfExists(pendingSubmissionPath);
         saveAutomationReport(options.runDir, report);
         console.log(`[제출] ${action.action} → ${submitted.conversationUrl}`);
         continue;
       }
-      const baselineResults = pendingBaselineResults ?? state.attempts.length;
+      removeIfExists(pendingSubmissionPath);
+      const pendingDownload = readJsonIfExists(pendingDownloadPath);
+      const baselineResults = validatePendingDownload(pendingDownload, action, state);
+      const tab = await findConversationTab(
+        client,
+        state.conversation_url,
+        Number(pendingDownload.tab_id),
+      );
+      preferredTabId = tab.id;
       const resultElement = await waitForResult(
         client,
         tab.id,
@@ -460,7 +713,8 @@ export async function runLoop(options) {
         destinationDir,
         `${parsed.name}-${String(attempt).padStart(3, "0")}${parsed.ext}`,
       );
-      copyFileSync(downloaded, destination);
+      copyFileSync(downloaded.path, destination);
+      if (downloaded.transient) removeIfExists(downloaded.path);
       const verification = runHarness(
         ["verify", "--run-dir", options.runDir, "--result-zip", destination],
         [0, 2],
@@ -471,8 +725,10 @@ export async function runLoop(options) {
         status: verification.status,
         result_sha256: verification.result_sha256,
         downloaded_as: path.basename(destination),
+        download_method: downloaded.method,
+        conversation_restored: downloaded.conversationRestored,
       });
-      pendingBaselineResults = null;
+      removeIfExists(pendingDownloadPath);
       saveAutomationReport(options.runDir, report);
       console.log(`[검증] 시도 ${attempt} → ${verification.status}`);
     }

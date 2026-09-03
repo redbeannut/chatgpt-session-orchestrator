@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 EXPECTED_TEXT = "PASS: browser loop verified\n"
@@ -303,12 +305,29 @@ def prepare(run_dir: Path, fixture_path: Path, spec_path: Path | None = None) ->
 
 
 def validate_chatgpt_url(url: str) -> str:
-    normalized = url.strip()
-    if not normalized.startswith("https://chatgpt.com/c/"):
-        raise ContractError("일반 ChatGPT 대화 URL만 기록할 수 있습니다.")
-    if any(char.isspace() for char in normalized):
+    raw = url.strip()
+    if any(char.isspace() for char in raw):
         raise ContractError("ChatGPT 대화 URL에 공백이 있습니다.")
-    return normalized
+    parsed = urlsplit(raw)
+    if parsed.scheme != "https" or parsed.netloc != "chatgpt.com":
+        raise ContractError("정식 ChatGPT 대화 URL만 기록할 수 있습니다.")
+    decoded_path = unquote(parsed.path).rstrip("/")
+    parts = [part for part in decoded_path.split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        raise ContractError("ChatGPT 대화 URL에 dot-segment 경로를 사용할 수 없습니다.")
+    if len(parts) == 2 and parts[0] == "c":
+        conversation_id = parts[1]
+    elif len(parts) == 4 and parts[0] == "g" and parts[2] == "c":
+        conversation_id = parts[3]
+    else:
+        raise ContractError("정식 ChatGPT 대화 URL만 기록할 수 있습니다.")
+    if not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        conversation_id,
+    ):
+        raise ContractError("ChatGPT 대화 ID가 정식 UUID 표기가 아닙니다.")
+    uuid.UUID(conversation_id)
+    return urlunsplit(("https", "chatgpt.com", decoded_path, "", ""))
 
 
 def record_submission(run_dir: Path, url: str, kind: str) -> dict:

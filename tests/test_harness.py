@@ -12,6 +12,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
+CHAT_URL = "https://chatgpt.com/c/6a98d663-fa60-83e8-9470-dd4056981f39"
+OTHER_CHAT_URL = "https://chatgpt.com/c/6a98f8c7-adfc-83ee-b8cb-b0446ad5b41b"
 
 import harness  # noqa: E402
 
@@ -22,7 +24,7 @@ class HarnessTests(unittest.TestCase):
         self.root = Path(self.temp_dir.name)
         self.run_dir = self.root / "run"
         harness.prepare(self.run_dir, PROJECT_ROOT / "fixtures" / "broken.txt")
-        harness.record_session(self.run_dir, "https://chatgpt.com/c/test-conversation")
+        harness.record_session(self.run_dir, CHAT_URL)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -83,7 +85,25 @@ class HarnessTests(unittest.TestCase):
 
     def test_conversation_url_cannot_change(self) -> None:
         with self.assertRaises(harness.ContractError):
-            harness.record_session(self.run_dir, "https://chatgpt.com/c/other")
+            harness.record_session(self.run_dir, OTHER_CHAT_URL)
+
+    def test_temporary_or_malformed_conversation_url_is_rejected(self) -> None:
+        invalid_urls = [
+            "https://chatgpt.com/c/WEB:temporary",
+            "https://chatgpt.com/c/WEB%3Atemporary",
+            f"{CHAT_URL}/extra",
+            CHAT_URL.replace("chatgpt.com", "example.com"),
+            "https://chatgpt.com/c/6a98d663fa6083e89470dd4056981f39",
+            "https://chatgpt.com/c/{6a98d663-fa60-83e8-9470-dd4056981f39}",
+            f"https://chatgpt.com/g/./c/{CHAT_URL.rsplit('/', 1)[-1]}",
+            f"https://chatgpt.com/g/../c/{CHAT_URL.rsplit('/', 1)[-1]}",
+        ]
+        for invalid_url in invalid_urls:
+            with self.subTest(invalid_url=invalid_url), self.assertRaises(harness.ContractError):
+                harness.validate_chatgpt_url(invalid_url)
+
+    def test_conversation_url_is_canonicalized(self) -> None:
+        self.assertEqual(harness.validate_chatgpt_url(f"{CHAT_URL}?x=1#main"), CHAT_URL)
 
     def test_next_action_and_submission_keys_are_idempotent(self) -> None:
         fresh_run = self.root / "fresh-run"
@@ -91,8 +111,8 @@ class HarnessTests(unittest.TestCase):
         initial = harness.next_action(fresh_run)
         self.assertEqual(initial["action"], "submit_initial")
         self.assertEqual(initial["submission_key"].split(":")[-2:], ["initial", "0"])
-        harness.record_session(fresh_run, "https://chatgpt.com/c/idempotent")
-        harness.record_session(fresh_run, "https://chatgpt.com/c/idempotent")
+        harness.record_session(fresh_run, CHAT_URL)
+        harness.record_session(fresh_run, CHAT_URL)
         state = json.loads((fresh_run / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(len(state["submissions"]), 1)
         self.assertEqual(harness.next_action(fresh_run)["action"], "await_download")
@@ -101,7 +121,7 @@ class HarnessTests(unittest.TestCase):
         harness.verify(self.run_dir, self.write_result("wrong\n"))
         action = harness.next_action(self.run_dir)
         self.assertEqual(action["action"], "submit_feedback")
-        self.assertEqual(action["conversation_url"], "https://chatgpt.com/c/test-conversation")
+        self.assertEqual(action["conversation_url"], CHAT_URL)
         harness.record_submission(self.run_dir, action["conversation_url"], "feedback")
         self.assertEqual(harness.next_action(self.run_dir)["action"], "await_download")
 
@@ -128,7 +148,7 @@ class HarnessTests(unittest.TestCase):
         spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
         command_run = self.root / "command-run"
         harness.prepare(command_run, PROJECT_ROOT / "fixtures" / "broken.txt", spec_path)
-        harness.record_session(command_run, "https://chatgpt.com/c/command-test")
+        harness.record_session(command_run, CHAT_URL)
         report, exit_code = harness.verify(command_run, self.write_result(harness.EXPECTED_TEXT))
         self.assertEqual(exit_code, 0)
         self.assertEqual(report["verifier"]["exit_code"], 0)
@@ -141,7 +161,7 @@ class HarnessTests(unittest.TestCase):
             PROJECT_ROOT / "fixtures" / "broken.txt",
             PROJECT_ROOT / "specs" / "command-canary.json",
         )
-        harness.record_session(command_run, "https://chatgpt.com/c/different-failures")
+        harness.record_session(command_run, CHAT_URL)
         first, _ = harness.verify(command_run, self.write_result("first\n"))
         second, _ = harness.verify(command_run, self.write_result("second\n"))
         self.assertNotEqual(first["failure_fingerprint"], second["failure_fingerprint"])
@@ -155,7 +175,7 @@ class HarnessTests(unittest.TestCase):
             PROJECT_ROOT / "fixtures" / "broken.txt",
             PROJECT_ROOT / "specs" / "command-canary.json",
         )
-        harness.record_session(command_run, "https://chatgpt.com/c/repeated-command-failure")
+        harness.record_session(command_run, CHAT_URL)
         first, _ = harness.verify(command_run, self.write_result("same command failure\n"))
         second, _ = harness.verify(command_run, self.write_result("same command failure\n"))
         self.assertEqual(first["failure_fingerprint"], second["failure_fingerprint"])
